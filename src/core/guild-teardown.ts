@@ -50,6 +50,18 @@ export interface PlannedItem {
   id: string;
   name: string;
   kind: repo.ProvisionedKind;
+  /**
+   * Roles only: true when the bot has been handing this role out, so emptying
+   * it is part of undoing the bot's work.
+   *
+   * The distinction matters for exactly one role and it is not a small
+   * difference. The bot assigns tier roles and nothing else — the KING role it
+   * merely reads, to decide who may run a command. So a KING role that
+   * predates the bot has a membership list the bot never wrote, and clearing
+   * it on revert would delete a moderator list the bot has no record of and
+   * cannot put back.
+   */
+  assignedByBot?: boolean;
 }
 
 export interface RevertPlan {
@@ -71,7 +83,10 @@ export interface RevertReport {
   deletedRoles: string[];
   deletedChannels: string[];
   restoredChannels: string[];
+  /** Adopted roles the bot had been assigning, kept but emptied. */
   releasedRoles: string[];
+  /** Adopted roles the bot only ever read, left exactly as they were. */
+  untouchedRoles: string[];
   clearedRows: number;
   failures: string[];
 }
@@ -109,6 +124,10 @@ export function planRevert(guild: Guild, options: RevertOptions = {}): RevertPla
 
   const recorded = new Set<string>();
 
+  // The roles the bot actually puts on people. Read before the guild data is
+  // cleared, and the authority on which adopted roles may be emptied.
+  const assigned = new Set(repo.getTierRoles(guild.id).map((r) => r.role_id));
+
   for (const item of repo.listProvisionedItems(guild.id)) {
     recorded.add(item.discord_id);
 
@@ -126,7 +145,7 @@ export function planRevert(guild: Guild, options: RevertOptions = {}): RevertPla
 
     if (item.kind === 'role') {
       if (item.created_by_bot === 1) plan.rolesToDelete.push(entry);
-      else plan.rolesToRelease.push(entry);
+      else plan.rolesToRelease.push({ ...entry, assignedByBot: assigned.has(item.discord_id) });
       continue;
     }
 
@@ -141,10 +160,25 @@ export function planRevert(guild: Guild, options: RevertOptions = {}): RevertPla
   return plan;
 }
 
-/** Every role and channel name setupGuild is capable of producing. */
+/**
+ * Every role and channel name setupGuild is capable of producing, minus the
+ * ones it is not safe to match on name alone.
+ *
+ * The KING role is deliberately absent. This list is only used by the
+ * name-matching sweep, which runs when provenance is missing and therefore
+ * cannot tell "the bot made this" from "this already existed" — and for KING
+ * the two outcomes are wildly lopsided. Guess wrong one way and the server
+ * loses its moderator role and the membership list inside it, with no record
+ * anywhere to rebuild it from. Guess wrong the other way and a stray, empty
+ * role survives a revert, which the operator can delete in two clicks and
+ * which affects nobody in the meantime, since the bot never hands KING out.
+ *
+ * Tier roles stay in the list: the bot assigns those, so leaving one behind
+ * leaves real state on real members.
+ */
 function configuredNames(): { roles: Set<string>; categories: Set<string>; channels: Set<string> } {
   return {
-    roles: new Set([SERVER_LAYOUT.kingRoleName, ...TIERS.map((t) => t.roleName)]),
+    roles: new Set(TIERS.map((t) => t.roleName)),
     categories: new Set([SERVER_LAYOUT.adminCategoryName, ...TIERS.map((t) => t.categoryName)]),
     // Text channel names are stored lowercased by Discord; voice names are not.
     channels: new Set([
@@ -210,6 +244,7 @@ export async function revertGuild(guild: Guild, options: RevertOptions = {}): Pr
     deletedChannels: [],
     restoredChannels: [],
     releasedRoles: [],
+    untouchedRoles: [],
     clearedRows: 0,
     failures: [],
   };
@@ -273,14 +308,23 @@ export async function revertGuild(guild: Guild, options: RevertOptions = {}): Pr
     }
   }
 
-  /* 5. Hand back roles that predate us, but empty them ------------------- */
+  /* 5. Hand back roles that predate us ----------------------------------- */
   for (const entry of plan.rolesToRelease) {
     const role = guild.roles.cache.get(entry.id);
     if (!role) continue;
 
-    // The role is not ours to delete. Its current membership is ours though,
-    // because the bot has been assigning and removing it wholesale, so
-    // clearing it is closer to "never touched" than leaving it in place.
+    // A role the bot never handed out is left completely alone: same name,
+    // same permissions, same members. Emptying it would destroy a membership
+    // list the bot did not write and has no way to restore — for an adopted
+    // KING role that is the server's moderator list.
+    if (entry.assignedByBot !== true) {
+      report.untouchedRoles.push(entry.name);
+      continue;
+    }
+
+    // A tier role the bot adopted is different: the bot has been assigning and
+    // removing it wholesale, so emptying it is closer to "never touched" than
+    // leaving the bot's placements behind.
     for (const member of role.members.values()) {
       await member.roles.remove(role, 'Community standing revert').catch(() => undefined);
     }

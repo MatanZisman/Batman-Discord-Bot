@@ -46,6 +46,8 @@ In the Discord Developer Portal the application needs the **Server Members Inten
 
 ### Who can run the admin commands
 
+**If a `KING` role already exists, setup adopts it and does not create a second one.** Whoever holds it gets admin access immediately, and the role itself is left untouched — same name, colour, permissions, position and members. The bot never assigns it; it only reads it to decide who may run a command, and grants the admin category's `ViewChannel` to its id. Two things to watch: the name match is **exact and case-sensitive**, so a role called `King` or `Kings` won't be found and the bot will make its own empty `KING` alongside it, leaving your existing moderators without access. And on `/standing-revert`, an adopted `KING` role is left entirely alone — not deleted, and not emptied — precisely because its membership is your moderator list and not something the bot wrote. That holds even in the `include unrecorded` mode: the name-matching sweep deliberately skips `KING`, since a false positive there would cost you the moderator list with no way to rebuild it, while a false negative leaves nothing worse than a stray role you can delete by hand.
+
 `/standing-setup`, `/standing-revert` and `/standing-admin` all require the **KING role**, and only work **inside the KING channel**, so administration never happens in front of the members. Two deliberate exceptions keep you from locking yourself out:
 
 - **Manage Server also passes.** On a fresh install the KING role exists but nobody holds it, and it is the way back in if the role is ever deleted.

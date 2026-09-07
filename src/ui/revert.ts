@@ -58,12 +58,24 @@ export function buildRevertConfirmation(plan: RevertPlan): BaseMessageOptions {
     });
   }
 
-  if (plan.rolesToRelease.length > 0) {
+  const toEmpty = plan.rolesToRelease.filter((r) => r.assignedByBot === true);
+  const toLeave = plan.rolesToRelease.filter((r) => r.assignedByBot !== true);
+
+  if (toEmpty.length > 0) {
     embed.addFields({
-      name: `Roles kept but cleared (${plan.rolesToRelease.length})`,
+      name: `Roles kept but cleared (${toEmpty.length})`,
       value: `${truncate(
-        plan.rolesToRelease.map((r) => r.name).join(', '),
-      )}\nThese existed before the bot arrived. The role stays, but it is taken off every member, since its membership was the bot's doing.`,
+        toEmpty.map((r) => r.name).join(', '),
+      )}\nThese existed before the bot arrived. The role stays, but it comes off every member, because the bot is what put them there.`,
+    });
+  }
+
+  if (toLeave.length > 0) {
+    embed.addFields({
+      name: `Roles left completely alone (${toLeave.length})`,
+      value: `${truncate(
+        toLeave.map((r) => r.name).join(', '),
+      )}\nThe bot only read these to decide who could run commands — it never handed them out. Members, permissions and name all stay exactly as they are.`,
     });
   }
 
@@ -119,6 +131,12 @@ export function buildRevertReport(report: RevertReport): string {
 
   if (report.releasedRoles.length > 0) {
     lines.push(`Left ${report.releasedRoles.join(', ')} in place but took them off every member.`);
+  }
+
+  if (report.untouchedRoles.length > 0) {
+    lines.push(
+      `Did not touch ${report.untouchedRoles.join(', ')} at all — members and permissions intact.`,
+    );
   }
 
   lines.push(`Erased ${report.clearedRows} database row(s). No ratings or standings remain.`);
