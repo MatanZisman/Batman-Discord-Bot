@@ -77,10 +77,10 @@ function format(action: LoggedAction): string | null {
         : `<@${action.actorId}> changed a rating they had given`;
 
     case 'opt_in':
-      return `<@${action.actorId}> joined the standing system`;
+      return `<@${action.actorId}> joined the standing system; suspended ratings resumed`;
 
     case 'opt_out':
-      return `<@${action.actorId}> left the standing system, and their ratings were deleted`;
+      return `<@${action.actorId}> left the standing system; ratings involving them are suspended`;
 
     case 'challenge_opened':
       return `<@${action.actorId}> opened a re-review, ${action.invited} rater(s) asked`;

@@ -11,6 +11,7 @@ import {
 } from 'discord.js';
 import { COMMANDS } from './commands.js';
 import { flushAllLogs } from './core/action-log.js';
+import { isFreshVoiceJoin, maybeSendJoinNotice } from './core/join-notice.js';
 import { recalculateStanding } from './core/standing-service.js';
 import { closeDatabase, openDatabase } from './db/index.js';
 import * as repo from './db/repo.js';
@@ -40,6 +41,9 @@ const client = new Client({
     // been in the server, which the scoring engine uses to dampen new accounts.
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.DirectMessages,
+    // Not privileged, so it needs no approval. Used for one thing only: the
+    // one-time launch notice, sent on a member's first voice join.
+    GatewayIntentBits.GuildVoiceStates,
   ],
   // Challenge replies arrive from DM channels the bot has never cached.
   partials: [Partials.Channel],
@@ -73,6 +77,21 @@ client.on(Events.GuildMemberRemove, async (member) => {
   for (const vote of repo.getVotesByRater(guild.id, member.id)) {
     await recalculateStanding(guild, vote.target_id, { notifyUser: false }).catch(() => undefined);
   }
+});
+
+// Someone arriving in voice is the trigger for their one-and-only "the system
+// exists" DM. Everything that decides whether they are actually due one lives
+// in maybeSendJoinNotice.
+client.on(Events.VoiceStateUpdate, (oldState, newState) => {
+  if (!isFreshVoiceJoin(oldState, newState)) return;
+
+  const member = newState.member;
+  const channelId = newState.channelId;
+  if (!member || !channelId) return;
+
+  void maybeSendJoinNotice(member, channelId).catch((error) =>
+    logger.error(`Launch notice failed for ${member.id}`, error),
+  );
 });
 
 client.on(Events.Error, (error) => logger.error('Gateway error', error));

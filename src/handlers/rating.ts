@@ -7,7 +7,7 @@ import {
   type StringSelectMenuInteraction,
   type UserSelectMenuInteraction,
 } from 'discord.js';
-import { DAY_MS, HOUR_MS, LIMITS, SCORING, tierAt, tierIndexByKey } from '../config.js';
+import { DAY_MS, LIMITS, MINUTE_MS, SCORING, tierAt, tierIndexByKey } from '../config.js';
 import * as repo from '../db/repo.js';
 import { logAction } from '../core/action-log.js';
 import { computeStanding, explainStanding } from '../core/scoring.js';
@@ -269,12 +269,12 @@ async function validateTarget(guild: Guild, raterId: string, targetId: string): 
 function describeUpdateCooldown(existing: repo.VoteRecord | undefined): string | null {
   if (!existing || existing.status !== 'active') return null;
 
-  const cooldownMs = LIMITS.VOTE_UPDATE_COOLDOWN_HOURS * HOUR_MS;
+  const cooldownMs = LIMITS.VOTE_UPDATE_COOLDOWN_MINUTES * MINUTE_MS;
   const elapsed = Date.now() - existing.updated_at;
   if (elapsed >= cooldownMs) return null;
 
-  const hoursLeft = Math.ceil((cooldownMs - elapsed) / HOUR_MS);
-  return `You already rated that player recently. You can change that rating again in about ${hoursLeft} hour(s).`;
+  const minutesLeft = Math.max(1, Math.ceil((cooldownMs - elapsed) / MINUTE_MS));
+  return `You just rated that player. You can change that rating again in about ${minutesLeft} minute(s).`;
 }
 
 /* -------------------------------------------------------------------------- */

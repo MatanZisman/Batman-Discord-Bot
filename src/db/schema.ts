@@ -19,7 +19,14 @@ CREATE TABLE IF NOT EXISTS guilds (
   -- already in the server are simply left alone. Kept so existing databases
   -- still open, never read or written.
   white_category_id  TEXT,
-  setup_at           INTEGER
+  setup_at           INTEGER,
+  -- Set while the system is paused for maintenance. Channels are hidden and
+  -- member-facing commands are refused, but every rating and standing stays
+  -- exactly where it is, so resuming picks up where things left off.
+  paused_at          INTEGER,
+  -- When the one-time "the system is live" DM was switched on. Members are
+  -- told on their first voice join after this moment, never before it.
+  notice_active_at   INTEGER
 );
 
 -- Small key/value scratchpad for things the bot needs to remember across
@@ -56,13 +63,25 @@ CREATE TABLE IF NOT EXISTS members (
   override_until    INTEGER,
   -- Last time this member moved to a worse tier, for the demotion cooldown.
   last_demotion_at  INTEGER,
+  -- 1 when a moderator removed them, as opposed to them opting out. The
+  -- difference matters only in one place: they cannot press Join to undo it.
+  removed_by_admin  INTEGER NOT NULL DEFAULT 0,
+  -- Set once the "the system is live" DM has actually been delivered. Two
+  -- columns, not one, because a failed DM is not a delivery: attempted_at
+  -- throttles retries while sent_at is the thing that guarantees exactly one.
+  notice_sent_at      INTEGER,
+  notice_attempted_at INTEGER,
   PRIMARY KEY (guild_id, user_id)
 );
 
 -- The ratings themselves.
---   status 'active'  : counts toward the target's standing
---   status 'expired' : aged out past VOTE_LIFETIME_DAYS, ignored, re-votable
---   status 'dropped' : removed by a challenge because the voter went silent
+--   status 'active'    : counts toward the target's standing
+--   status 'expired'   : aged out past VOTE_LIFETIME_DAYS, ignored, re-votable
+--   status 'dropped'   : removed by a challenge because the voter went silent
+--   status 'suspended' : one of the two people involved has opted out, so it
+--                        counts for nobody. Restored if they come back before
+--                        it would have expired anyway. This is what stops
+--                        opt-out/opt-in being used to wipe a bad record.
 -- The UNIQUE index is what enforces "one rating per person, per target".
 CREATE TABLE IF NOT EXISTS votes (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -153,4 +172,9 @@ export const MIGRATIONS: string[] = [
   'ALTER TABLE members ADD COLUMN override_tier_key TEXT',
   'ALTER TABLE members ADD COLUMN override_until INTEGER',
   'ALTER TABLE members ADD COLUMN last_demotion_at INTEGER',
+  'ALTER TABLE members ADD COLUMN removed_by_admin INTEGER NOT NULL DEFAULT 0',
+  'ALTER TABLE guilds ADD COLUMN paused_at INTEGER',
+  'ALTER TABLE members ADD COLUMN notice_sent_at INTEGER',
+  'ALTER TABLE members ADD COLUMN notice_attempted_at INTEGER',
+  'ALTER TABLE guilds ADD COLUMN notice_active_at INTEGER',
 ];

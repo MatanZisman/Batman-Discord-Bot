@@ -98,8 +98,9 @@ export function buildRatingHubMessage(): BaseMessageOptions {
       {
         name: '⑥ Opting out',
         value: [
-          'Press **Participation** to leave the system entirely. If you leave, every rating you have given and received is deleted, nobody can rate you, and you cannot rate anyone.',
-          'You keep access to all the channels that existed before this system, and you can rejoin whenever you like.',
+          'Press **Participation** to leave the system entirely. Every rating involving you stops counting, you have no standing, nobody can rate you, and you cannot rate anyone. You keep access to all the channels that existed before this system, and you can rejoin whenever you like.',
+          '',
+          `Leaving is not a shortcut to a clean slate: if you rejoin, ratings that have not yet aged out resume. They expire ${SCORING.VOTE_LIFETIME_DAYS} days after they were given either way, so time clears your record — for everyone, on the same terms.`,
         ].join('\n'),
       },
     )

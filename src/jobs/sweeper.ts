@@ -45,6 +45,7 @@ export async function sweep(client: Client): Promise<void> {
   }
 
   for (const { guild_id, target_id } of affected) {
+    if (repo.isGuildPaused(guild_id)) continue;
     const guild = await client.guilds.fetch(guild_id).catch(() => null);
     if (!guild) continue;
     await recalculateStanding(guild, target_id).catch((error) =>
@@ -66,6 +67,11 @@ export async function sweep(client: Client): Promise<void> {
 
   /* 4. Re-evaluate anyone who could have moved ------------------------- */
   for (const guild of client.guilds.cache.values()) {
+    // A paused guild has no visible channels and no member activity, so
+    // moving people between hidden areas would only generate DMs about
+    // changes nobody can see.
+    if (repo.isGuildPaused(guild.id)) continue;
+
     const count = await resweepGuild(guild).catch((error) => {
       logger.error(`Resweep failed for guild ${guild.id}`, error);
       return 0;

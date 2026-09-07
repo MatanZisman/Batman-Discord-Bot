@@ -3,11 +3,13 @@ import {
   MessageFlags,
   SlashCommandBuilder,
   type ChatInputCommandInteraction,
+  type TextChannel,
 } from 'discord.js';
-import { TIERS } from './config.js';
+import { DAY_MS, LIMITS, TIERS } from './config.js';
 import * as repo from './db/repo.js';
-import { setupGuild } from './core/guild-setup.js';
-import { recalculateGuild } from './core/standing-service.js';
+import { publishRatingHub, setupGuild } from './core/guild-setup.js';
+import { maintenanceNotice, pauseGuild, resumeGuild } from './core/maintenance.js';
+import { applyTierRoles, recalculateGuild, recalculateStanding } from './core/standing-service.js';
 import { handleOpenChallenge } from './handlers/challenge.js';
 import { showParticipationMenu } from './handlers/participation.js';
 import { showOwnStanding, startRatingSession } from './handlers/rating.js';
@@ -79,10 +81,85 @@ export const COMMANDS = [
       sub
         .setName('distribution')
         .setDescription('How many members sit in each area. Counts only, never names.'),
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName('set-standing')
+        .setDescription("Place a member in an area directly, overriding what the community score says")
+        .addUserOption((o) => o.setName('user').setDescription('Who to place').setRequired(true))
+        .addStringOption((o) =>
+          o
+            .setName('area')
+            .setDescription('Where to put them, or Automatic to hand them back to the score')
+            .setRequired(true)
+            .addChoices(
+              ...TIERS.map((tier) => ({ name: tier.roleName, value: tier.key })),
+              { name: 'Automatic (release override)', value: 'auto' },
+            ),
+        )
+        .addIntegerOption((o) =>
+          o
+            .setName('days')
+            .setDescription(`How long the placement holds. Defaults to ${LIMITS.KING_OVERRIDE_DAYS} days.`)
+            .setMinValue(1)
+            .setMaxValue(365),
+        ),
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName('remove')
+        .setDescription('Remove a member from the system. They cannot rejoin themselves.')
+        .addUserOption((o) => o.setName('user').setDescription('Who to remove').setRequired(true)),
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName('reinstate')
+        .setDescription('Undo a removal, letting the member choose to rejoin')
+        .addUserOption((o) => o.setName('user').setDescription('Who to reinstate').setRequired(true)),
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName('pause')
+        .setDescription('Hide the system for maintenance. Keeps every rating and standing.'),
+    )
+    .addSubcommand((sub) =>
+      sub.setName('resume').setDescription('Bring the system back after a pause'),
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName('refresh-hub')
+        .setDescription('Repost the pinned explanation and buttons in the public channel'),
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName('notice')
+        .setDescription('The one-time DM telling each member the system exists')
+        .addStringOption((o) =>
+          o
+            .setName('action')
+            .setDescription('Turn it on, turn it off, or see how far it has got')
+            .setRequired(true)
+            .addChoices(
+              { name: 'on — start telling people on their first voice join', value: 'on' },
+              { name: 'off — stop telling anyone new', value: 'off' },
+              { name: 'status — how many are still to be told', value: 'status' },
+            ),
+        ),
     ),
 ].map((command) => command.toJSON());
 
+const MEMBER_COMMANDS = new Set(['rate', 'my-standing', 'challenge', 'participation']);
+
 export async function dispatchCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  // Admin commands keep working while paused; that is how you unpause.
+  if (MEMBER_COMMANDS.has(interaction.commandName)) {
+    const notice = maintenanceNotice(interaction.guildId);
+    if (notice) {
+      await interaction.reply({ content: notice, flags: MessageFlags.Ephemeral });
+      return;
+    }
+  }
+
   switch (interaction.commandName) {
     case 'rate': {
       if (await wrongChannel(interaction)) return;
@@ -208,5 +285,284 @@ async function runAdmin(interaction: ChatInputCommandInteraction): Promise<void>
       ].join('\n'),
       flags: MessageFlags.Ephemeral,
     });
+    return;
   }
+
+  if (sub === 'set-standing') await runSetStanding(interaction);
+  else if (sub === 'remove') await runRemove(interaction);
+  else if (sub === 'reinstate') await runReinstate(interaction);
+  else if (sub === 'pause') await runPause(interaction);
+  else if (sub === 'resume') await runResume(interaction);
+  else if (sub === 'refresh-hub') await runRefreshHub(interaction);
+  else if (sub === 'notice') await runNotice(interaction);
+}
+
+/**
+ * Arms, disarms or reports on the one-time launch DM.
+ *
+ * Switching it on is an explicit act rather than something setup does, because
+ * it starts sending messages to real people: you want the pinned explanation
+ * in place and the channels looking right *before* anyone is pointed at them.
+ */
+async function runNotice(interaction: ChatInputCommandInteraction): Promise<void> {
+  const guild = interaction.guild;
+  if (!guild) return;
+
+  const action = interaction.options.getString('action', true);
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  if (action === 'status') {
+    const activeAt = repo.getJoinNoticeActiveAt(guild.id);
+    const pending = repo.countPendingNotices(guild.id);
+
+    await interaction.editReply(
+      activeAt
+        ? [
+            `**On** since <t:${Math.floor(activeAt / 1000)}:F>.`,
+            `${pending} member(s) are still to be told, and will be on their next voice join.`,
+            '',
+            'Anyone whose DMs are closed is retried the next day rather than written off, so this number can fall slowly.',
+          ].join('\n')
+        : `**Off.** Nobody is being told. ${pending} member(s) have never received the notice.`,
+    );
+    return;
+  }
+
+  if (action === 'off') {
+    repo.setJoinNoticeActive(guild.id, false);
+    logAction(guild, {
+      kind: 'admin',
+      actorId: interaction.user.id,
+      summary: 'switched the launch notice off',
+    });
+    await interaction.editReply(
+      'Off. Nobody else will be messaged. Everyone already told stays told, so switching it back on will not repeat anyone.',
+    );
+    return;
+  }
+
+  const alreadyKnown = repo.skipNoticeForExistingUsers(guild.id);
+  repo.setJoinNoticeActive(guild.id, true);
+  const pending = repo.countPendingNotices(guild.id);
+
+  logAction(guild, {
+    kind: 'admin',
+    actorId: interaction.user.id,
+    summary: 'switched the launch notice on',
+  });
+
+  await interaction.editReply(
+    [
+      '**On.**',
+      `${pending} member(s) will each get one private DM, the first time they join a voice channel from now on.`,
+      alreadyKnown > 0
+        ? `${alreadyKnown} member(s) were skipped because they have already rated someone or already chose to opt out — they know it exists.`
+        : null,
+      '',
+      'Nobody is messaged twice, including across restarts and redeploys. Nobody is messaged for joining the AFK channel, and nobody is messaged while the system is paused.',
+    ]
+      .filter(Boolean)
+      .join('\n'),
+  );
+}
+
+/**
+ * Places a member directly, bypassing the score.
+ *
+ * Implemented as a time-limited override rather than a written-in standing, so
+ * it lapses on its own and hands the member back to the community rather than
+ * pinning them somewhere forever because nobody remembered to undo it. It also
+ * reuses the release path the sweeper already runs for challenge overrides.
+ */
+async function runSetStanding(interaction: ChatInputCommandInteraction): Promise<void> {
+  const guild = interaction.guild;
+  if (!guild) return;
+
+  const user = interaction.options.getUser('user', true);
+  const area = interaction.options.getString('area', true);
+  const days = interaction.options.getInteger('days') ?? LIMITS.KING_OVERRIDE_DAYS;
+
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  const record = repo.ensureMember(guild.id, user.id);
+  if (record.participating === 0) {
+    await interaction.editReply(
+      `${user} is outside the standing system, so there is no standing to set. Reinstate them, or ask them to join, first.`,
+    );
+    return;
+  }
+
+  if (area === 'auto') {
+    repo.setTierOverride(guild.id, user.id, null, null);
+    await recalculateStanding(guild, user.id, { notifyUser: false });
+    logAction(guild, {
+      kind: 'admin',
+      actorId: interaction.user.id,
+      summary: `released the manual placement on <@${user.id}>`,
+    });
+    await interaction.editReply(`${user} is back on the community score.`);
+    return;
+  }
+
+  const tier = TIERS.find((t) => t.key === area);
+  if (!tier) {
+    await interaction.editReply('That is not one of the areas.');
+    return;
+  }
+
+  repo.setTierOverride(guild.id, user.id, tier.key, Date.now() + days * DAY_MS);
+  await recalculateStanding(guild, user.id, { notifyUser: true });
+
+  logAction(guild, {
+    kind: 'admin',
+    actorId: interaction.user.id,
+    summary: `placed <@${user.id}> in ${tier.roleName} for ${days} day(s)`,
+  });
+
+  await interaction.editReply(
+    [
+      `${user} is now in **${tier.roleName}** for ${days} day(s), regardless of their score.`,
+      '',
+      'They have been told their area changed, in a private message, with no reason given and no mention of who decided it. After that it lapses on its own and the community score takes over again.',
+    ].join('\n'),
+  );
+}
+
+async function runRemove(interaction: ChatInputCommandInteraction): Promise<void> {
+  const guild = interaction.guild;
+  if (!guild) return;
+
+  const user = interaction.options.getUser('user', true);
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  repo.ensureMember(guild.id, user.id);
+
+  // Same suspension the member's own opt-out uses, so a removal that is later
+  // undone does not silently wipe the ratings involved.
+  const affected = repo.suspendVotesInvolving(guild.id, user.id);
+  repo.setParticipation(guild.id, user.id, false);
+  repo.setTierOverride(guild.id, user.id, null, null);
+  repo.setAdminRemoval(guild.id, user.id, true);
+  repo.audit(guild.id, 'admin_remove', user.id);
+
+  const member = await guild.members.fetch(user.id).catch(() => null);
+  if (member) await applyTierRoles(guild, member, null);
+
+  logAction(guild, {
+    kind: 'admin',
+    actorId: interaction.user.id,
+    summary: `removed <@${user.id}> from the standing system`,
+  });
+
+  await interaction.editReply(
+    [
+      `${user} is out of the standing system and cannot rejoin themselves.`,
+      '',
+      'Every rating involving them is suspended rather than deleted, so `/standing-admin reinstate` puts things back as they were.',
+    ].join('\n'),
+  );
+
+  for (const targetId of affected) {
+    recalculateStanding(guild, targetId).catch(() => undefined);
+  }
+}
+
+async function runReinstate(interaction: ChatInputCommandInteraction): Promise<void> {
+  const guild = interaction.guild;
+  if (!guild) return;
+
+  const user = interaction.options.getUser('user', true);
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  repo.ensureMember(guild.id, user.id);
+  repo.setAdminRemoval(guild.id, user.id, false);
+  repo.audit(guild.id, 'admin_reinstate', user.id);
+
+  logAction(guild, {
+    kind: 'admin',
+    actorId: interaction.user.id,
+    summary: `reinstated <@${user.id}>`,
+  });
+
+  // Left opted out on purpose: taking part is the member's choice, so the
+  // block is lifted and they decide whether to walk back through the door.
+  await interaction.editReply(
+    `${user} can rejoin again whenever they choose to. They are still outside the system until they press Join, and any suspended ratings resume at that point.`,
+  );
+}
+
+async function runPause(interaction: ChatInputCommandInteraction): Promise<void> {
+  const guild = interaction.guild;
+  if (!guild) return;
+
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  const report = await pauseGuild(guild);
+
+  logAction(guild, {
+    kind: 'admin',
+    actorId: interaction.user.id,
+    summary: 'paused the standing system for maintenance',
+  });
+
+  await interaction.editReply(
+    [
+      '**Paused.**',
+      report.hidden.length > 0 ? `Hidden: ${report.hidden.join(', ')}` : 'Nothing needed hiding.',
+      report.failures.length > 0 ? `Could not hide: ${report.failures.join('; ')}` : null,
+      '',
+      'Every rating, standing and open re-review is untouched, and member commands now say the system is down for maintenance. This channel stays visible so you can run `/standing-admin resume`.',
+    ]
+      .filter(Boolean)
+      .join('\n'),
+  );
+}
+
+async function runResume(interaction: ChatInputCommandInteraction): Promise<void> {
+  const guild = interaction.guild;
+  if (!guild) return;
+
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  try {
+    const { membersInitialised } = await resumeGuild(guild);
+
+    logAction(guild, {
+      kind: 'admin',
+      actorId: interaction.user.id,
+      summary: 'resumed the standing system',
+    });
+
+    await interaction.editReply(
+      [
+        '**Back up.**',
+        `Channels are visible again and ${membersInitialised} member(s) have been re-checked against their standing.`,
+        '',
+        'Standings are exactly what they were before the pause. Anything deleted during the downtime was rebuilt, and the pinned explanation was reposted.',
+      ].join('\n'),
+    );
+  } catch (error) {
+    await interaction.editReply(
+      `Could not resume: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+async function runRefreshHub(interaction: ChatInputCommandInteraction): Promise<void> {
+  const guild = interaction.guild;
+  if (!guild) return;
+
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  const settings = repo.getGuildSettings(guild.id);
+  const channel = settings?.rating_channel_id
+    ? await guild.channels.fetch(settings.rating_channel_id).catch(() => null)
+    : null;
+
+  if (!channel?.isTextBased()) {
+    await interaction.editReply('I could not find the public channel. Run `/standing-setup` instead.');
+    return;
+  }
+
+  await publishRatingHub(channel as TextChannel);
+  await interaction.editReply(`Reposted the explanation and buttons in <#${channel.id}>.`);
 }

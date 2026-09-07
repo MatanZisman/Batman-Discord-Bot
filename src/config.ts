@@ -289,10 +289,18 @@ export const SCORING = {
 } as const;
 
 export const LIMITS = {
-  /** A voter may only change an existing rating this often, per target. */
-  VOTE_UPDATE_COOLDOWN_HOURS: 24,
+  /**
+   * A voter may only change an existing rating this often, per target.
+   *
+   * Short on purpose: this is a correction window, not a brake. Someone who
+   * misclicks a 5 instead of a 2 should be able to fix it while they still
+   * remember, and a few minutes is enough to stop a rating being flipped back
+   * and forth in real time to nudge a target across a tier boundary. The daily
+   * cap below is what actually does the anti-brigade work.
+   */
+  VOTE_UPDATE_COOLDOWN_MINUTES: 5,
   /** Anti-brigade: max brand new ratings one member can cast per rolling day. */
-  MAX_NEW_VOTES_PER_DAY: 8,
+  MAX_NEW_VOTES_PER_DAY: 20,
   /** How often a player may open a re-review challenge. */
   CHALLENGE_COOLDOWN_DAYS: 7,
   /** How long voters have to answer a challenge DM before their vote is dropped. */
@@ -453,3 +461,4 @@ export function tierIndexByKey(key: string): number {
 
 export const DAY_MS = 24 * 60 * 60 * 1000;
 export const HOUR_MS = 60 * 60 * 1000;
+export const MINUTE_MS = 60 * 1000;

@@ -2,6 +2,7 @@ import { MessageFlags, type Interaction } from 'discord.js';
 import { NS, decodeId } from './lib/custom-ids.js';
 import { logger } from './lib/logger.js';
 import { dispatchCommand } from './commands.js';
+import { maintenanceNotice } from './core/maintenance.js';
 import {
   handleChallengeKeep,
   handleChallengeLook,
@@ -42,6 +43,16 @@ export async function routeInteraction(interaction: Interaction): Promise<void> 
     if (interaction.isButton() || interaction.isStringSelectMenu() || interaction.isUserSelectMenu()) {
       const id = decodeId(interaction.customId);
       if (!id) return;
+
+      // The member-facing namespaces go quiet while the system is paused.
+      // KING and REVERT do not, since those are how it gets unpaused.
+      if (id.ns === NS.RATE || id.ns === NS.CHALLENGE || id.ns === NS.PARTICIPATION) {
+        const notice = maintenanceNotice(interaction.guildId);
+        if (notice) {
+          await interaction.reply({ content: notice, flags: MessageFlags.Ephemeral });
+          return;
+        }
+      }
 
       switch (id.ns) {
         case NS.RATE:

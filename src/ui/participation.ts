@@ -4,7 +4,7 @@ import {
   ButtonStyle,
   type BaseMessageOptions,
 } from 'discord.js';
-import { TIERS } from '../config.js';
+import { SCORING, TIERS } from '../config.js';
 import { NS, encodeId } from '../lib/custom-ids.js';
 
 /**
@@ -38,7 +38,7 @@ export function buildParticipationStatus(participating: boolean): BaseMessageOpt
     : [
         '**You are outside the standing system.**',
         '',
-        `You have no standing and no ratings. Nobody can rate you, you cannot rate anyone, and you see only the channels that were already in this server before the ${tierNames} areas were added.`,
+        `You have no standing, and no rating involving you counts for anything. Nobody can rate you, you cannot rate anyone, and you see only the channels that were already in this server before the ${tierNames} areas were added.`,
       ].join('\n');
 
   const menu = buildParticipationMenu(participating);
@@ -51,13 +51,11 @@ export function buildLeaveConfirmation(): BaseMessageOptions {
       '**Leave the standing system?**',
       '',
       'If you leave:',
-      `• Every rating you have given and received is deleted immediately.`,
+      '• Every rating you have given and received stops counting immediately.',
       '• You lose access to the colour areas, and keep every channel that was in the server beforehand.',
       '• Nobody can rate you, and you cannot rate anyone.',
       '',
-      'You can rejoin whenever you like. Rejoining starts you fresh in ' +
-        (TIERS[0]?.roleName ?? 'the first tier') +
-        ' with no ratings.',
+      `If you rejoin, ratings that have not yet aged out resume where they left off — leaving is not a way to clear them. They expire on their own ${SCORING.VOTE_LIFETIME_DAYS} days after they were given, whether you are in the system or not, so staying out that long clears them exactly as it would for anyone else.`,
     ].join('\n'),
     components: [
       new ActionRowBuilder<ButtonBuilder>().addComponents(

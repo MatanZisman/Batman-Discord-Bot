@@ -10,6 +10,8 @@ export interface GuildSettings {
   king_role_id: string | null;
   king_channel_id: string | null;
   setup_at: number | null;
+  /** Non-null while the system is paused for maintenance. */
+  paused_at?: number | null;
 }
 
 export interface TierRole {
@@ -22,8 +24,14 @@ export interface TierRole {
 export interface MemberRecord {
   guild_id: string;
   user_id: string;
-  /** 1 = takes part in the standing system, 0 = opted out (white channels only). */
+  /** 1 = takes part in the standing system, 0 = outside it. */
   participating: number;
+  /** 1 when a moderator removed them, which blocks them rejoining themselves. */
+  removed_by_admin: number;
+  /** When the one-time launch DM was delivered, or null if it never was. */
+  notice_sent_at: number | null;
+  /** When delivery was last attempted, successful or not. Throttles retries. */
+  notice_attempted_at: number | null;
   tier_key: string | null;
   score: number | null;
   rater_count: number;
@@ -37,7 +45,7 @@ export interface MemberRecord {
   last_demotion_at: number | null;
 }
 
-export type VoteStatus = 'active' | 'expired' | 'dropped';
+export type VoteStatus = 'active' | 'expired' | 'dropped' | 'suspended';
 
 export interface VoteRecord {
   id: number;
@@ -109,6 +117,126 @@ export function saveGuildSettings(settings: Omit<GuildSettings, 'setup_at'> & { 
          setup_at          = excluded.setup_at`,
     )
     .run({ ...settings, setup_at: settings.setup_at ?? Date.now() });
+}
+
+/**
+ * Marks a member as removed by a moderator, or reinstates them.
+ *
+ * Removal is deliberately not the same row-state as opting out. Both leave the
+ * member outside the system, but a removal cannot be undone by the member
+ * pressing Join, which is the entire point of it.
+ */
+export function setAdminRemoval(guildId: string, userId: string, removed: boolean): void {
+  getDatabase()
+    .prepare('UPDATE members SET removed_by_admin = ?, updated_at = ? WHERE guild_id = ? AND user_id = ?')
+    .run(removed ? 1 : 0, Date.now(), guildId, userId);
+}
+
+/** Pauses or resumes the whole system for a guild. Touches no ratings. */
+export function setGuildPaused(guildId: string, paused: boolean): void {
+  getDatabase()
+    .prepare('UPDATE guilds SET paused_at = ? WHERE guild_id = ?')
+    .run(paused ? Date.now() : null, guildId);
+}
+
+export function isGuildPaused(guildId: string): boolean {
+  const row = getDatabase()
+    .prepare<[string], { paused_at: number | null }>('SELECT paused_at FROM guilds WHERE guild_id = ?')
+    .get(guildId);
+  return Boolean(row?.paused_at);
+}
+
+/* -------------------------------------------------------------------------- */
+/* The one-time launch notice                                                 */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Switches the launch notice on or off, recording the moment it went live.
+ *
+ * That timestamp is what "the first voice join since activation" is measured
+ * against, so it is stored rather than inferred: the bot restarts, and a
+ * process-start time would re-arm the notice on every deploy.
+ */
+export function setJoinNoticeActive(guildId: string, active: boolean): void {
+  getDatabase()
+    .prepare('UPDATE guilds SET notice_active_at = ? WHERE guild_id = ?')
+    .run(active ? Date.now() : null, guildId);
+}
+
+export function getJoinNoticeActiveAt(guildId: string): number | null {
+  const row = getDatabase()
+    .prepare<[string], { notice_active_at: number | null }>(
+      'SELECT notice_active_at FROM guilds WHERE guild_id = ?',
+    )
+    .get(guildId);
+  return row?.notice_active_at ?? null;
+}
+
+/**
+ * Claims the exclusive right to send one member their launch notice.
+ *
+ * This is the whole guarantee of "exactly once". Voice state events arrive in
+ * bursts and can be delivered more than once for what a human would call a
+ * single join, so the check and the claim have to be one operation: the WHERE
+ * clause tests `notice_sent_at IS NULL` and the UPDATE stakes the claim in the
+ * same statement. SQLite serialises it, so of two simultaneous events exactly
+ * one sees `changes === 1` and earns the right to call Discord.
+ *
+ * Returns false when someone else already claimed it, when the notice has
+ * already landed, or when a failed attempt is still inside its retry cooldown.
+ */
+export function claimJoinNotice(guildId: string, userId: string, retryCutoff: number): boolean {
+  const result = getDatabase()
+    .prepare(
+      `UPDATE members
+          SET notice_attempted_at = ?
+        WHERE guild_id = ?
+          AND user_id  = ?
+          AND notice_sent_at IS NULL
+          AND (notice_attempted_at IS NULL OR notice_attempted_at <= ?)`,
+    )
+    .run(Date.now(), guildId, userId, retryCutoff);
+
+  return result.changes === 1;
+}
+
+/** Confirms the DM actually arrived. Until this runs, the send can be retried. */
+export function confirmJoinNoticeSent(guildId: string, userId: string): void {
+  getDatabase()
+    .prepare('UPDATE members SET notice_sent_at = ? WHERE guild_id = ? AND user_id = ? AND notice_sent_at IS NULL')
+    .run(Date.now(), guildId, userId);
+}
+
+/**
+ * Marks members who demonstrably already know the system exists, so switching
+ * the notice on does not DM people who have been using it for weeks. Anyone
+ * who has cast a rating, or who has already made an opt-out decision, has met
+ * the system by definition.
+ */
+export function skipNoticeForExistingUsers(guildId: string): number {
+  const now = Date.now();
+  const result = getDatabase()
+    .prepare(
+      `UPDATE members
+          SET notice_sent_at = ?
+        WHERE guild_id = ?
+          AND notice_sent_at IS NULL
+          AND (participating = 0
+               OR user_id IN (SELECT DISTINCT rater_id FROM votes WHERE guild_id = ?))`,
+    )
+    .run(now, guildId, guildId);
+
+  return result.changes;
+}
+
+/** How many members are still waiting to be told. Counts only, never names. */
+export function countPendingNotices(guildId: string): number {
+  const row = getDatabase()
+    .prepare<[string], { n: number }>(
+      'SELECT COUNT(*) AS n FROM members WHERE guild_id = ? AND notice_sent_at IS NULL',
+    )
+    .get(guildId);
+  return row?.n ?? 0;
 }
 
 export function setTierRole(guildId: string, tierKey: string, roleId: string, categoryId: string | null): void {
@@ -345,25 +473,91 @@ export function expireStaleVotes(olderThan: number): Array<{ guild_id: string; t
     )
     .all(olderThan);
 
-  db.prepare(`UPDATE votes SET status = 'expired' WHERE status = 'active' AND updated_at < ?`).run(olderThan);
+  // Suspended ratings age out on the same clock. Without this they would sit
+  // there indefinitely waiting for a member who may never come back, and the
+  // promise that a rating only lasts VOTE_LIFETIME_DAYS would quietly stop
+  // being true for anyone who had opted out. They need no recalculation,
+  // since they were already counting for nobody.
+  db.prepare(
+    `UPDATE votes SET status = 'expired'
+      WHERE status IN ('active', 'suspended') AND updated_at < ?`,
+  ).run(olderThan);
   return affected;
 }
 
-/** Wipes every rating involving a member. Used when someone opts out. */
-export function deleteVotesInvolving(guildId: string, userId: string): string[] {
+/**
+ * Takes every rating involving a member out of circulation when they opt out.
+ *
+ * Deliberately a suspension and not a delete. Deleting would make opting out
+ * and straight back in the cheapest way in the system to erase a bad record:
+ * instant, unlimited, and requiring nobody's agreement, which is strictly
+ * better than the challenge flow that exists for exactly that purpose. Here
+ * the ratings stop counting immediately — the member really is out of the
+ * system — but they are still there to be restored if the same person returns
+ * before the ratings would have aged out on their own.
+ *
+ * @returns the other members whose standing needs recomputing, because this
+ *          member's ratings of them have just stopped counting.
+ */
+export function suspendVotesInvolving(guildId: string, userId: string): string[] {
   const db = getDatabase();
   const affectedTargets = db
     .prepare<[string, string], { target_id: string }>(
-      'SELECT DISTINCT target_id FROM votes WHERE guild_id = ? AND rater_id = ?',
+      `SELECT DISTINCT target_id FROM votes
+        WHERE guild_id = ? AND rater_id = ? AND status = 'active'`,
     )
     .all(guildId, userId)
     .map((r) => r.target_id);
 
-  db.prepare('DELETE FROM votes WHERE guild_id = ? AND (rater_id = ? OR target_id = ?)').run(
-    guildId,
-    userId,
-    userId,
-  );
+  // Only active ratings are suspended. Ones already expired or dropped stay
+  // that way, so coming back cannot resurrect a rating that a challenge
+  // removed or that timed out long ago.
+  db.prepare(
+    `UPDATE votes SET status = 'suspended'
+      WHERE guild_id = ? AND (rater_id = ? OR target_id = ?) AND status = 'active'`,
+  ).run(guildId, userId, userId);
+
+  return affectedTargets.filter((id) => id !== userId);
+}
+
+/**
+ * Puts suspended ratings back when a member rejoins.
+ *
+ * Anything that would have aged out while they were away is expired instead of
+ * restored, so sitting outside the system neither preserves ratings past their
+ * natural life nor shortens it. Staying away for a full VOTE_LIFETIME_DAYS
+ * genuinely does clear your record — that is the intended way to get a clean
+ * slate, and it is the same way everybody else gets one.
+ *
+ * @param expiryCutoff ratings last touched before this are expired, not restored.
+ * @returns the other members whose standing needs recomputing.
+ */
+export function restoreVotesInvolving(
+  guildId: string,
+  userId: string,
+  expiryCutoff: number,
+): string[] {
+  const db = getDatabase();
+
+  db.prepare(
+    `UPDATE votes SET status = 'expired'
+      WHERE guild_id = ? AND (rater_id = ? OR target_id = ?)
+        AND status = 'suspended' AND updated_at < ?`,
+  ).run(guildId, userId, userId, expiryCutoff);
+
+  const affectedTargets = db
+    .prepare<[string, string], { target_id: string }>(
+      `SELECT DISTINCT target_id FROM votes
+        WHERE guild_id = ? AND rater_id = ? AND status = 'suspended'`,
+    )
+    .all(guildId, userId)
+    .map((r) => r.target_id);
+
+  db.prepare(
+    `UPDATE votes SET status = 'active'
+      WHERE guild_id = ? AND (rater_id = ? OR target_id = ?) AND status = 'suspended'`,
+  ).run(guildId, userId, userId);
+
   return affectedTargets.filter((id) => id !== userId);
 }
 

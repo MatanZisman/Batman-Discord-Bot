@@ -23,6 +23,201 @@ afterAll(() => {
   rmSync(dbPath, { force: true });
 });
 
+/**
+ * Opting out and straight back in must not be a way to erase a bad record.
+ * These are the tests that keep it that way: without suspension it would be
+ * the cheapest reset in the system, and strictly better than the challenge
+ * flow built for the purpose.
+ */
+describe('opting out and back in', () => {
+  const G = 'guild-optout';
+  const DAY = 24 * 60 * 60 * 1000;
+
+  it('stops suspended ratings from counting', () => {
+    repo.upsertVote(G, 'rater-a', 'quitter', 5);
+    repo.upsertVote(G, 'rater-b', 'quitter', 4);
+
+    repo.suspendVotesInvolving(G, 'quitter');
+
+    expect(repo.getVotesForTarget(G, 'quitter', 'active')).toHaveLength(0);
+    expect(repo.getVotesForTarget(G, 'quitter', 'suspended')).toHaveLength(2);
+  });
+
+  it('brings them back on rejoin, so leaving is not a reset', () => {
+    const restored = repo.restoreVotesInvolving(G, 'quitter', Date.now() - 30 * DAY);
+
+    const active = repo.getVotesForTarget(G, 'quitter', 'active');
+    expect(active).toHaveLength(2);
+    expect(active.map((v) => v.value).sort()).toEqual([4, 5]);
+    // The quitter rated nobody, so nobody else needs recomputing.
+    expect(restored).toHaveLength(0);
+  });
+
+  it('does not restore ratings that aged out while they were away', () => {
+    repo.upsertVote(G, 'rater-c', 'longgone', 5);
+    repo.suspendVotesInvolving(G, 'longgone');
+
+    // Rejoining after the rating's natural life has passed.
+    const restored = repo.restoreVotesInvolving(G, 'longgone', Date.now() + DAY);
+
+    expect(repo.getVotesForTarget(G, 'longgone', 'active')).toHaveLength(0);
+    expect(repo.getVotesForTarget(G, 'longgone', 'expired')).toHaveLength(1);
+    expect(restored).toHaveLength(0);
+  });
+
+  it('reports whose standing changed when a rater leaves', () => {
+    repo.upsertVote(G, 'leaver', 'victim-1', 5);
+    repo.upsertVote(G, 'leaver', 'victim-2', 4);
+
+    const affected = repo.suspendVotesInvolving(G, 'leaver');
+
+    expect(affected.sort()).toEqual(['victim-1', 'victim-2']);
+    expect(repo.getVotesForTarget(G, 'victim-1', 'active')).toHaveLength(0);
+  });
+
+  it('never resurrects a rating a challenge dropped', () => {
+    repo.upsertVote(G, 'rater-d', 'challenger', 5);
+    const vote = repo.getVote(G, 'rater-d', 'challenger');
+    repo.setVoteStatus(vote!.id, 'dropped');
+
+    repo.suspendVotesInvolving(G, 'challenger');
+    repo.restoreVotesInvolving(G, 'challenger', Date.now() - 30 * DAY);
+
+    expect(repo.getVotesForTarget(G, 'challenger', 'active')).toHaveLength(0);
+    expect(repo.getVotesForTarget(G, 'challenger', 'dropped')).toHaveLength(1);
+  });
+});
+
+describe('admin controls', () => {
+  const G = 'guild-admin';
+
+  it('marks a removal so the member cannot rejoin themselves', () => {
+    repo.ensureMember(G, 'troublemaker');
+    repo.setParticipation(G, 'troublemaker', false);
+    repo.setAdminRemoval(G, 'troublemaker', true);
+
+    expect(repo.getMember(G, 'troublemaker')?.removed_by_admin).toBe(1);
+  });
+
+  it('distinguishes a removal from an ordinary opt-out', () => {
+    repo.ensureMember(G, 'quit-by-choice');
+    repo.setParticipation(G, 'quit-by-choice', false);
+
+    // Both are outside the system, but only one is barred from coming back.
+    expect(repo.getMember(G, 'quit-by-choice')?.participating).toBe(0);
+    expect(repo.getMember(G, 'quit-by-choice')?.removed_by_admin).toBe(0);
+  });
+
+  it('lifts the block on reinstatement', () => {
+    repo.setAdminRemoval(G, 'troublemaker', false);
+    expect(repo.getMember(G, 'troublemaker')?.removed_by_admin).toBe(0);
+  });
+
+  it('pauses and resumes a guild without touching ratings', () => {
+    repo.saveGuildSettings({
+      guild_id: G,
+      rating_channel_id: 'c1',
+      king_role_id: 'r1',
+      king_channel_id: 'c2',
+    });
+    repo.upsertVote(G, 'someone', 'somebody', 4);
+
+    repo.setGuildPaused(G, true);
+    expect(repo.isGuildPaused(G)).toBe(true);
+    // The whole point: a pause is not a revert.
+    expect(repo.getVotesForTarget(G, 'somebody', 'active')).toHaveLength(1);
+
+    repo.setGuildPaused(G, false);
+    expect(repo.isGuildPaused(G)).toBe(false);
+    expect(repo.getVotesForTarget(G, 'somebody', 'active')).toHaveLength(1);
+  });
+
+  it('reports an unknown guild as not paused', () => {
+    expect(repo.isGuildPaused('never-heard-of-it')).toBe(false);
+  });
+});
+
+describe('the one-time launch notice', () => {
+  const G = 'guild-notice';
+  const HOUR = 60 * 60 * 1000;
+
+  beforeAll(() => {
+    repo.saveGuildSettings({
+      guild_id: G,
+      rating_channel_id: 'c1',
+      king_role_id: 'r1',
+      king_channel_id: 'c2',
+    });
+  });
+
+  it('is off until switched on, and remembers when it went live', () => {
+    expect(repo.getJoinNoticeActiveAt(G)).toBeNull();
+
+    repo.setJoinNoticeActive(G, true);
+    expect(repo.getJoinNoticeActiveAt(G)).toBeCloseTo(Date.now(), -4);
+
+    repo.setJoinNoticeActive(G, false);
+    expect(repo.getJoinNoticeActiveAt(G)).toBeNull();
+  });
+
+  it('lets exactly one caller claim a send, however many race for it', () => {
+    repo.ensureMember(G, 'racer');
+    const cutoff = Date.now() - 24 * HOUR;
+
+    // Stands in for several voice-state events arriving at once.
+    const claims = [1, 2, 3, 4, 5].map(() => repo.claimJoinNotice(G, 'racer', cutoff));
+
+    expect(claims.filter(Boolean)).toHaveLength(1);
+  });
+
+  it('never sends twice once delivery is confirmed', () => {
+    repo.ensureMember(G, 'told');
+    const cutoff = Date.now() - 24 * HOUR;
+
+    expect(repo.claimJoinNotice(G, 'told', cutoff)).toBe(true);
+    repo.confirmJoinNoticeSent(G, 'told');
+
+    // A year of voice joins later, with every cooldown long expired.
+    expect(repo.claimJoinNotice(G, 'told', Date.now() + 365 * 24 * HOUR)).toBe(false);
+    expect(repo.getMember(G, 'told')?.notice_sent_at).not.toBeNull();
+  });
+
+  it('retries a failed delivery, but only after the cooldown', () => {
+    repo.ensureMember(G, 'dms-closed');
+
+    // First attempt: claimed, then the DM fails, so it is never confirmed.
+    expect(repo.claimJoinNotice(G, 'dms-closed', Date.now() - 24 * HOUR)).toBe(true);
+    expect(repo.getMember(G, 'dms-closed')?.notice_sent_at).toBeNull();
+
+    // Joins voice again straight away: still inside the cooldown.
+    expect(repo.claimJoinNotice(G, 'dms-closed', Date.now() - 24 * HOUR)).toBe(false);
+
+    // A day later, a cutoff that now covers the earlier attempt.
+    expect(repo.claimJoinNotice(G, 'dms-closed', Date.now() + 1000)).toBe(true);
+  });
+
+  it('skips people who have already met the system', () => {
+    repo.ensureMember(G, 'active-rater');
+    repo.ensureMember(G, 'opted-out');
+    repo.ensureMember(G, 'never-seen-it');
+    repo.upsertVote(G, 'active-rater', 'somebody', 3);
+    repo.setParticipation(G, 'opted-out', false);
+
+    const skipped = repo.skipNoticeForExistingUsers(G);
+
+    expect(skipped).toBe(2);
+    expect(repo.getMember(G, 'active-rater')?.notice_sent_at).not.toBeNull();
+    expect(repo.getMember(G, 'opted-out')?.notice_sent_at).not.toBeNull();
+    expect(repo.getMember(G, 'never-seen-it')?.notice_sent_at).toBeNull();
+  });
+
+  it('counts who is still waiting without naming them', () => {
+    const before = repo.countPendingNotices(G);
+    repo.ensureMember(G, 'newcomer');
+    expect(repo.countPendingNotices(G)).toBe(before + 1);
+  });
+});
+
 describe('votes', () => {
   it('keeps exactly one rating per rater per target', () => {
     const first = repo.upsertVote(GUILD, 'matan', 'meitar', 4);
@@ -57,15 +252,19 @@ describe('votes', () => {
     expect(repo.getVotesForTarget(GUILD, 'meitar')).toHaveLength(2);
   });
 
-  it('wipes both directions when someone opts out', () => {
+  it('suspends both directions when someone opts out, without discarding them', () => {
     repo.ensureMember(GUILD, 'matan');
     repo.upsertVote(GUILD, 'third-party', 'matan', 5);
 
-    const affected = repo.deleteVotesInvolving(GUILD, 'matan');
+    const affected = repo.suspendVotesInvolving(GUILD, 'matan');
 
+    // Ratings matan gave stop counting, so those targets need recomputing.
     expect(affected).toContain('meitar');
-    expect(repo.getVotesForTarget(GUILD, 'matan')).toHaveLength(0);
-    expect(repo.getVote(GUILD, 'matan', 'meitar')).toBeUndefined();
+    // Ratings he received stop counting too, but the rows survive so that
+    // rejoining restores them rather than handing him a clean slate.
+    expect(repo.getVotesForTarget(GUILD, 'matan', 'active')).toHaveLength(0);
+    expect(repo.getVotesForTarget(GUILD, 'matan')).toHaveLength(1);
+    expect(repo.getVote(GUILD, 'matan', 'meitar')?.status).toBe('suspended');
   });
 });
 

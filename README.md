@@ -53,6 +53,43 @@ In the Discord Developer Portal the application needs the **Server Members Inten
 
 These commands carry no Discord-level permission gate, because Discord can only gate on built-in permissions and `KING` is a plain role — gating on Manage Server would hide the commands from the people meant to run them. The check happens at runtime instead, so a member who tries gets a private "that is not for you" and nothing else.
 
+### The admin toolkit
+
+| `/standing-admin …` | What it does |
+| --- | --- |
+| `set-standing user area [days]` | Places someone directly, ignoring their score |
+| `remove user` | Takes someone out of the system, and they cannot rejoin themselves |
+| `reinstate user` | Lifts a removal |
+| `pause` / `resume` | Maintenance mode — see below |
+| `recalculate` | Recompute every standing after a tuning change |
+| `distribution` | Per-area counts, never names |
+| `refresh-hub` | Repost the pinned explanation and buttons |
+| `notice on/off/status` | The one-time launch DM — see below |
+
+**`set-standing` is a time-limited override, not a written-in standing.** It defaults to 30 days and then lapses on its own, handing the member back to the community score. Permanent-by-default placements rot: somebody gets parked in Orange during an argument and is still there a year later because nobody remembered to undo it. Choosing `Automatic` releases it early. The member is told their area changed, privately, with no reason and no mention of who decided it — the same message any automatic move sends, so a manual placement is not a public correction.
+
+**`remove` is not the same as the member opting out.** Both leave them outside the system, but a removal sets a flag that stops them pressing Join to undo it. It suspends their ratings rather than deleting them, exactly like opting out, so `reinstate` genuinely restores the previous state. Reinstating deliberately leaves them opted *out*: the block is lifted and they choose whether to walk back in, because participation is theirs to decide.
+
+### Telling people it exists
+
+`/standing-admin notice on` starts telling members the system is live: each one gets **one** private DM, the first time they join a voice channel after that moment. `status` reports how many are still to be told, and `off` stops telling anyone new without un-telling anyone.
+
+The trigger is a voice join for two reasons, and the second is the load-bearing one. It is courteous — people hear about it as they sit down to play, which is when it's relevant and when they'll actually read it. And it is safe: DMing every member of a server within a few minutes is precisely the pattern Discord's anti-spam heuristics act on, and it can get a bot flagged. A voice trigger spreads the same messages over days with no scheduling code at all.
+
+**Exactly once is a real guarantee, not a best effort.** Voice state events are not one-per-join: a client can emit several for what a person experiences as a single action, and reconnects replay them. So the send is *claimed* atomically in SQLite — the same statement that checks `notice_sent_at IS NULL` also stakes the claim, so of two simultaneous events exactly one sees `changes === 1` and earns the right to call Discord. The claim is persistent, so redeploys don't re-arm anyone.
+
+**A failed DM is not a sent DM.** Members can refuse DMs from the server and the API simply errors, so delivery is confirmed in a second column. A failure leaves the member eligible on their next voice join, throttled to once a day so somebody with DMs closed doesn't generate a failed call every time they hop channels. This is the one part that cannot be promised outright: if a member never opens their DMs, they are never reached, and the `status` count is how you see that.
+
+Switching it on skips anyone who has already cast a rating or already chosen to opt out, since they have met the system by definition. Nobody is messaged for joining the AFK channel, and nobody is messaged while the system is paused.
+
+One sequencing point worth respecting: turn this on *before* the first ratings start moving people. Otherwise a member's first contact with the system is the DM telling them their area changed, and arriving as bad news that reads as an accusation rather than an explanation.
+
+### Maintenance mode
+
+`/standing-admin pause` takes the system off the air without dismantling it. Tier categories and the public channel are hidden, member commands answer with a "paused for maintenance" note, and the sweeper skips the server. Every rating, standing, provenance record and open re-review is untouched, so `resume` picks up exactly where you left off. This is the deliberate opposite of `/standing-revert`, which exists to remove the bot and erase its data.
+
+Two details worth knowing. **The KING channel stays visible while paused** — admin commands only work inside it, so hiding it would leave nobody able to run `resume`. And **`resume` re-runs the normal setup**, which is idempotent: it rebuilds the permission cascade from config, recreates anything deleted during the downtime and reposts the pinned explanation. A pause is therefore a safe window in which to reorganise the server.
+
 ## Deploying on Railway
 
 The repo carries a `railway.json`, so a fresh service needs three things: the environment variables, a volume, and one setting turned off.
@@ -99,11 +136,13 @@ Everything below is ephemeral or a DM. There is no public output anywhere in the
 
 **Rating** — press *Rate a player* on the pinned message in `#standing-ratings` (or `/rate`), pick someone from the dropdown, choose 1–5 on a labelled scale, then "rate another player?" loops you back to the picker until you press Finish.
 
-**One rating per person, per player.** The database has a `UNIQUE (guild_id, rater_id, target_id)` index, so rating someone twice is impossible by construction — a second rating replaces the first. You can change a rating, but only once every 24 hours per target, so nobody can oscillate a rating to nudge someone across a boundary.
+**One rating per person, per player.** The database has a `UNIQUE (guild_id, rater_id, target_id)` index, so rating someone twice is impossible by construction — a second rating replaces the first. You can change a rating after a 5-minute pause, which is a correction window rather than a brake: misclicking a 5 instead of a 2 should be fixable while you still remember, and five minutes is enough to stop a rating being flipped back and forth in real time to nudge someone across a boundary. The 20-per-day cap on *new* ratings is what actually does the anti-brigade work.
 
 **Their own standing** — `/my-standing` or the *My standing* button. Shows your tier, your score, how many active ratings it rests on, and exactly which gate is keeping you from the next tier. Only ever your own.
 
-**Opting out** — `/participation`. Leaving deletes every rating you have given and received, strips your tier role, and leaves you with every channel that was in the server before the bot arrived. Nobody can rate you and you cannot rate anyone. Rejoining is one button and starts you fresh in Green.
+**Opting out** — `/participation`. Leaving stops every rating you have given and received from counting, strips your tier role, and leaves you with every channel that was in the server before the bot arrived. Nobody can rate you and you cannot rate anyone. Rejoining is one button.
+
+Leaving **suspends** those ratings rather than deleting them, and rejoining restores any that have not aged out. This is deliberate. If opting out deleted them, then leaving and immediately rejoining would be the cheapest reset in the system — instant, unlimited, needing nobody's agreement — and strictly better than the re-review flow built for exactly that purpose, which is capped at once a week and involves the KING role. Suspension keeps the exit genuine (you really are out, and nothing about you counts for anything) without making it a laundering route. Ratings still expire 30 days after they were given, in or out of the system, so time clears your record on the same terms as everybody else's. Suspension never revives a rating that a challenge dropped or that had already expired.
 
 **Asking for a re-review** — `/challenge`, at most once every 7 days. See below.
 
@@ -198,6 +237,7 @@ This was a hard requirement, so it is worth being explicit about the mechanisms 
 - **Who rated whom is never surfaced.** Not to the target, not to the KING, not in the action log at its default setting. The KING's report shows how many people re-rated, kept, or went silent — never who or what. (The one way to break this is deliberate; see the trade-off section below.)
 - **The rating conversation is fully private**, ephemeral end to end. The public channel it starts from is read-only for members, so nothing about anybody's standing can ever be posted in it — not by the bot, and not by another member.
 - **Both directions are reversible by design.** Ratings expire in 30 days on their own, improvement is never throttled, and opting out is one button.
+- **Opting out is a real exit, not a reset.** It is free, instant and reversible, but it suspends ratings rather than erasing them, so it cannot be used to launder a record — see the opt-out note above.
 
 ## The action log, and the one real trade-off
 
@@ -226,13 +266,15 @@ src/
     guild-teardown.ts       the inverse, driven by recorded provenance
     challenge-service.ts    the three-phase re-review workflow
     action-log.ts           batched member-activity feed for the KING channel
+    join-notice.ts          the one-time launch DM, fired on first voice join
+    maintenance.ts          pause/resume: hide the surface, keep all the data
   handlers/                 interaction handlers (rating, challenge, participation)
     guards.ts               the KING role + KING channel gate on admin commands
   ui/                       message builders, kept separate from logic
   db/                       SQLite schema, connection, typed queries
   jobs/sweeper.ts           the only clock: vote expiry, challenge deadlines,
                             override release, deferred demotions
-  lib/                      logger, custom-id encoding
+  lib/                      logger, custom-id encoding, private-reply helper
 ```
 
 The scoring engine is deliberately isolated from everything else. That is what makes the balance testable, and it means the tuning conversation ("is Red too easy to reach?") never turns into a code change.
