@@ -148,8 +148,12 @@ export function buildAdjustmentOptions(
       ? `→ ${area} at ${preview.projectedScore.toFixed(2)}`
       : `stays ${area}, ${preview.projectedScore.toFixed(2)}`;
 
-    const cost =
-      preview.reportsToUndo !== null
+    // Order matters: a blocked push is the one outcome a moderator will
+    // otherwise read as a broken button, so it takes precedence over the
+    // cost note.
+    const note = preview.blockedBy
+      ? ` · no move: ${preview.blockedBy}`
+      : preview.reportsToUndo !== null
         ? ` · ${preview.reportsToUndo} report(s) to undo`
         : preview.direction === 'ease' && moved
           ? ' · out of reach by reports alone'
@@ -158,7 +162,7 @@ export function buildAdjustmentOptions(
     return new StringSelectMenuOptionBuilder()
       .setValue(`${preview.direction}:${preview.reports}`)
       .setLabel(`${verb} — ${preview.reports} report(s)' worth`)
-      .setDescription(`${landing}${cost}`.slice(0, 100));
+      .setDescription(`${landing}${note}`.slice(0, 100));
   });
 }
 

@@ -384,6 +384,30 @@ describe('moderator adjustments', () => {
   });
 });
 
+describe('a standing computed without its adjustments', () => {
+  it('is a different number, which is why the context is not optional', () => {
+    // The bug this pins: /my-standing built its own computeStanding call and
+    // omitted the credits, so a member pushed to 3.62 was shown 1.00 to their
+    // face. Both numbers below are correct for their inputs — that is exactly
+    // what made it hard to spot. Callers go through evaluateStanding now.
+    const credits: CreditInput[] = [
+      {
+        value: SCORING.MAX_RATING,
+        reports: 5,
+        grantedAt: NOW,
+        expiresAt: NOW + CREDITS.LIFETIME_DAYS * DAY_MS,
+      },
+    ];
+
+    const withCredits = computeStanding([], NOW, GREEN, { credits });
+    const withoutCredits = computeStanding([], NOW, GREEN);
+
+    expect(withCredits.score).toBeCloseTo(3.22, 2);
+    expect(withoutCredits.score).toBe(SCORING.PRIOR_VALUE);
+    expect(withCredits.score).not.toBeCloseTo(withoutCredits.score, 2);
+  });
+});
+
 describe('pricing an adjustment', () => {
   it('answers zero when the player is already there', () => {
     expect(reportsToReach(GREEN, [], NOW, GREEN)).toBe(0);

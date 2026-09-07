@@ -1,5 +1,5 @@
 import type { Guild } from 'discord.js';
-import { CREDITS, DAY_MS, SCORING, tierAt, tierIndexByKey } from '../config.js';
+import { CREDITS, DAY_MS, SCORING, TIER_COUNT, tierAt, tierIndexByKey } from '../config.js';
 import * as repo from '../db/repo.js';
 import {
   computeStanding,
@@ -8,7 +8,12 @@ import {
   type StandingContext,
   type VoteInput,
 } from './scoring.js';
-import { collectCredits, collectVoteInputs, recalculateStanding } from './standing-service.js';
+import {
+  collectCredits,
+  collectVoteInputs,
+  recalculateStanding,
+  standingContextFor,
+} from './standing-service.js';
 
 /**
  * ============================================================================
@@ -59,6 +64,18 @@ export interface AdjustmentPreview {
    * them — so there is nothing further to price.
    */
   reportsToUndo: number | null;
+
+  /**
+   * Why pressure did not move them, when it did not.
+   *
+   * This is the case that looks like a bug and is not. Adjustments move the
+   * score and never the gates, so pushing somebody with no raters produces a
+   * terrible score and no movement at all: the next area still wants three
+   * real people and there are none. Without saying so the picker reports
+   * "stays Green at 3.62" and leaves a moderator to conclude the button is
+   * broken.
+   */
+  blockedBy: string | null;
 }
 
 interface Basis {
@@ -80,13 +97,14 @@ async function basisFor(guild: Guild, targetId: string): Promise<Basis> {
   const votes = await collectVoteInputs(guild, targetId);
   const credits = collectCredits(guild.id, targetId);
 
+  // Credits are supplied per simulation below, so they are stripped from the
+  // shared context rather than baked in.
+  const { credits: _ignored, ...context } = standingContextFor(guild, record, credits);
+
   return {
     votes,
     credits,
-    context: {
-      communityAgeMs: Date.now() - guild.createdTimestamp,
-      lastDemotionAt: record.last_demotion_at,
-    },
+    context,
     currentTierIndex: record.tier_key ? tierIndexByKey(record.tier_key) : 0,
   };
 }
@@ -118,6 +136,12 @@ function priceOne(basis: Basis, direction: Direction, reports: number, now: numb
         })
       : null;
 
+  // Only asked for pressure that failed to land. Relief that does not move
+  // somebody is held by the score itself, which the label already shows.
+  const stuck = direction === 'push' && after.uncappedTierIndex <= currentTierIndex;
+  const nextGate = after.gates[Math.min(after.uncappedTierIndex + 1, TIER_COUNT - 1)];
+  const nonScoreGates = (nextGate?.failedGates ?? []).filter((gate) => !gate.startsWith('score'));
+
   return {
     direction,
     reports,
@@ -126,6 +150,7 @@ function priceOne(basis: Basis, direction: Direction, reports: number, now: numb
     projectedScore: after.score,
     projectedTierIndex: after.uncappedTierIndex,
     reportsToUndo,
+    blockedBy: stuck && nonScoreGates.length > 0 ? nonScoreGates.join(', ') : null,
   };
 }
 

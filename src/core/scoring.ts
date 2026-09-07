@@ -526,7 +526,12 @@ export function explainStanding(standing: Standing): string {
   const lines = [
     `Tier: ${tier.roleName}`,
     `Score: ${standing.score.toFixed(2)} / ${SCORING.MAX_RATING} (lower is better)`,
-    `Based on ${standing.raterCount} active rating(s), combined trust ${standing.effectiveWeight.toFixed(2)}`,
+    // Reported as a fact about the ratings, not as the derivation of the score
+    // above it. A score can include a moderator adjustment, and "based on 0
+    // ratings: 3.62" reads as a bug to the member looking at it. This wording
+    // stays true either way without telling them a moderator was involved,
+    // which the review design deliberately keeps quiet.
+    `Active ratings counting toward it: ${standing.raterCount} (combined trust ${standing.effectiveWeight.toFixed(2)})`,
   ];
 
   const nextTier = TIERS[standing.tierIndex + 1];

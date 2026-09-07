@@ -448,9 +448,13 @@ async function runAdjust(interaction: ChatInputCommandInteraction): Promise<void
       ? `\n\nIt would take **${preview.reportsToUndo}** fresh report(s) at the top of the scale to put them back where they were — the community can overrule this, it does not have to wait it out.`
       : '';
 
+  const blocked = preview.blockedBy
+    ? `\n\n**Their area did not move, and will not on this alone:** ${preview.blockedBy}. Adjustments move the score and never the headcount or consensus gates, so pressure cannot place somebody the community has not actually rated. The score is recorded and takes effect once enough real people have weighed in.`
+    : '';
+
   await interaction.editReply(
     [
-      `${user} is now in **${areaName(outcome.appliedTierIndex)}** at **${preview.projectedScore.toFixed(2)}**, from ${preview.currentScore.toFixed(2)}.${undo}`,
+      `${user} is now in **${areaName(outcome.appliedTierIndex)}** at **${preview.projectedScore.toFixed(2)}**, from ${preview.currentScore.toFixed(2)}.${undo}${blocked}`,
       '',
       `The adjustment is ${reports} report(s)' worth of signal, not a placement: every real rating still counts, and this fades out over ${CREDITS.LIFETIME_DAYS} days. ${outcome.moved ? 'They have been told their area changed, privately, with no reason given and no mention of who decided it.' : 'Their area did not move, so they were told nothing.'}`,
     ].join('\n'),

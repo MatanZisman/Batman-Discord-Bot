@@ -6,10 +6,21 @@ import { maintenanceNotice } from './maintenance.js';
 
 /**
  * ============================================================================
- *  THE ONE-TIME LAUNCH NOTICE
+ *  THE ONE-TIME "THIS SYSTEM EXISTS" DM
  * ============================================================================
- *  Tells each member the system exists, once, as a private DM, triggered by
- *  their first voice join after the notice was switched on.
+ *  Tells each member the system exists, once, as a private DM. Two triggers
+ *  feed one ledger:
+ *
+ *    ARRIVAL   somebody joins the server and is enrolled. This is the only
+ *              way a member who was not present at launch ever hears about
+ *              the system.
+ *    VOICE     the first voice join after a KING switched announcements on.
+ *              This is the launch case, for the members already in the server.
+ *
+ *  ONE LEDGER, NOT TWO. Both write `notice_sent_at`, so a member who arrives
+ *  today and plays tomorrow is told once, not twice. Keeping them separate
+ *  would produce exactly the duplicate the ledger exists to prevent, since
+ *  every new arrival is also, shortly afterwards, a first voice join.
  *
  *  WHY THIS TRIGGER
  *  Two reasons, and the second is the load-bearing one. It is courteous:
@@ -51,14 +62,42 @@ export function isFreshVoiceJoin(oldState: VoiceState, newState: VoiceState): bo
  * event: all the gating lives here, and the common case is one indexed read.
  */
 export async function maybeSendJoinNotice(member: GuildMember, channelId: string): Promise<void> {
+  const guild = member.guild;
+
+  // The launch case only, so it waits for a KING to switch announcements on.
+  if (!repo.getJoinNoticeActiveAt(guild.id)) return;
+  // Sitting in AFK is not sitting down to play.
+  if (guild.afkChannelId && channelId === guild.afkChannelId) return;
+
+  await deliver(member, 'voice');
+}
+
+/**
+ * Sends the welcome to somebody who has just joined the server.
+ *
+ * Not gated on the announcement switch, unlike the voice trigger. That switch
+ * answers "should I go and tell the people already here?", which is a one-off
+ * decision about a bulk send. A single new arrival is a different question,
+ * and a server that has had the system running for months should still
+ * introduce it to the person who walked in five seconds ago — otherwise they
+ * are the only member who never finds out why some channels are invisible.
+ */
+export async function maybeSendArrivalNotice(member: GuildMember): Promise<void> {
+  await deliver(member, 'arrival');
+}
+
+type Flavour = 'voice' | 'arrival';
+
+async function deliver(member: GuildMember, flavour: Flavour): Promise<void> {
   if (member.user.bot) return;
 
   const guild = member.guild;
-  if (!repo.getJoinNoticeActiveAt(guild.id)) return;
-  // Nothing to advertise while the system is hidden.
+
+  // Nothing to point them at before setup has run, and nothing to advertise
+  // while the system is hidden for maintenance.
+  const settings = repo.getGuildSettings(guild.id);
+  if (!settings?.rating_channel_id) return;
   if (maintenanceNotice(guild.id)) return;
-  // Sitting in AFK is not sitting down to play.
-  if (guild.afkChannelId && channelId === guild.afkChannelId) return;
 
   const record = repo.ensureMember(guild.id, member.id, member.joinedTimestamp ?? Date.now());
   if (record.notice_sent_at !== null) return;
@@ -69,27 +108,38 @@ export async function maybeSendJoinNotice(member: GuildMember, channelId: string
   if (!repo.claimJoinNotice(guild.id, member.id, retryCutoff)) return;
 
   try {
-    await member.send(buildNoticeBody(guild.id));
+    await member.send(buildNoticeBody(guild.id, flavour));
     repo.confirmJoinNoticeSent(guild.id, member.id);
-    repo.audit(guild.id, 'notice_sent', member.id);
-    logger.debug(`Sent the launch notice to ${member.id} in ${guild.id}`);
+    repo.audit(guild.id, 'notice_sent', member.id, flavour);
+    logger.debug(`Sent the ${flavour} notice to ${member.id} in ${guild.id}`);
   } catch {
     // Almost always error 50007: DMs from server members are closed. The
     // claim stands as an attempt, so they come round again after the
     // cooldown rather than being written off.
-    logger.debug(`Could not DM the launch notice to ${member.id}; will retry after the cooldown.`);
+    logger.debug(`Could not DM the notice to ${member.id}; will retry after the cooldown.`);
   }
 }
 
-function buildNoticeBody(guildId: string): string {
+function buildNoticeBody(guildId: string, flavour: Flavour): string {
   const settings = repo.getGuildSettings(guildId);
   const hub = settings?.rating_channel_id ? `<#${settings.rating_channel_id}>` : 'the standing channel';
   const firstTier = TIERS[0]?.roleName ?? 'the first area';
 
+  const opening =
+    flavour === 'arrival'
+      ? [
+          `**Welcome — one thing to know**`,
+          '',
+          `This server has a community rating system for how people are to play with. Teammates rate each other privately, and that decides which set of channels you see. You start in **${firstTier}**, along with everyone else.`,
+        ]
+      : [
+          `**Something new in the server**`,
+          '',
+          `There is now a community rating system for how people are to play with. Teammates rate each other privately, and that decides which set of channels you see. You start in **${firstTier}**, along with everyone else.`,
+        ];
+
   return [
-    `**Something new in the server**`,
-    '',
-    `There is now a community rating system for how people are to play with. Teammates rate each other privately, and that decides which set of channels you see. You start in **${firstTier}**, along with everyone else.`,
+    ...opening,
     '',
     `The short version: ratings are private, nobody can see who rated them or what anyone else was given, and no channel ever announces anyone's rating. You can rate people, see your own standing, ask for a re-review if you think yours is wrong, or leave the system entirely.`,
     '',

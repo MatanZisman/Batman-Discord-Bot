@@ -92,9 +92,14 @@ What does accumulate is litter from three sources: Discord's own "so-and-so pinn
 
 ### Telling people it exists
 
-`/standing-admin notice on` starts telling members the system is live: each one gets **one** private DM, the first time they join a voice channel after that moment. `status` reports how many are still to be told, and `off` stops telling anyone new without un-telling anyone.
+Two triggers, **one ledger**. A member is told the system exists exactly once, whichever way they arrive at it:
 
-The trigger is a voice join for two reasons, and the second is the load-bearing one. It is courteous — people hear about it as they sit down to play, which is when it's relevant and when they'll actually read it. And it is safe: DMing every member of a server within a few minutes is precisely the pattern Discord's anti-spam heuristics act on, and it can get a bot flagged. A voice trigger spreads the same messages over days with no scheduling code at all.
+- **On arrival** — somebody joins the server and gets a welcome DM. This is the only way a member who wasn't present at launch ever hears about it, and it isn't gated on the announcement switch: that switch answers "should I go and tell everyone already here?", which is a different question from introducing the system to the person who walked in five seconds ago.
+- **On first voice join** — the launch case, for the members already in the server when you flip it on with `/standing-admin notice on`. `status` reports how many are still to be told, and `off` stops telling anyone new without un-telling anyone.
+
+Both write `notice_sent_at`, which is what stops the obvious duplicate: every new arrival is also, shortly afterwards, a first voice join.
+
+The voice trigger exists for two reasons, and the second is the load-bearing one. It is courteous — people hear about it as they sit down to play, which is when it's relevant and when they'll actually read it. And it is safe: DMing every member of a server within a few minutes is precisely the pattern Discord's anti-spam heuristics act on, and it can get a bot flagged. A voice trigger spreads the same messages over days with no scheduling code at all.
 
 **Exactly once is a real guarantee, not a best effort.** Voice state events are not one-per-join: a client can emit several for what a person experiences as a single action, and reconnects replay them. So the send is *claimed* atomically in SQLite — the same statement that checks `notice_sent_at IS NULL` also stakes the claim, so of two simultaneous events exactly one sees `changes === 1` and earns the right to call Discord. The claim is persistent, so redeploys don't re-arm anyone.
 
@@ -103,6 +108,22 @@ The trigger is a voice join for two reasons, and the second is the load-bearing 
 Switching it on skips anyone who has already cast a rating or already chosen to opt out, since they have met the system by definition. Nobody is messaged for joining the AFK channel, and nobody is messaged while the system is paused.
 
 One sequencing point worth respecting: turn this on *before* the first ratings start moving people. Otherwise a member's first contact with the system is the DM telling them their area changed, and arriving as bad news that reads as an accusation rather than an explanation.
+
+### Every DM the bot can send
+
+The full list, deliberately short. A member hears from the bot only when:
+
+1. **Their area actually changed** — Green ⇄ Yellow ⇄ Orange ⇄ Red. One DM per move, never per rating.
+2. **They joined the server** — the arrival welcome above.
+3. **A KING switched announcements on** — the launch notice above, once.
+
+There is no fourth case. In particular, **a moderator adjusting someone is not itself an occasion**: if the adjustment moves their area they get case 1, worded exactly as any automatic move, and if it doesn't they hear nothing at all. That is what keeps a successful review indistinguishable from the community easing off on its own.
+
+**An initialisation is not a change.** This is subtler than it sounds and it used to spam people. A stored tier of `null` compares unequal to tier 0, so the obvious "did the tier change?" check fires for every member nobody has evaluated yet — and the resulting DM tells somebody their standing is now Green when it has been Green since the day they joined. Three routes hit that, and the third is the one that actually caused it: a rating landing on a member the setup backfill missed, a member who joined while the bot was offline, and the periodic resweep, whose query counts a null tier as "not the default area" (`NULL IS NOT 'green'` is true in SQLite) and so pulls in precisely the un-evaluated members with notifications on.
+
+So `null` → default area is silent, which covers `/standing-setup`, `resume` after a pause, and first activation in one rule. The suppression is deliberately narrow: a first evaluation that puts somebody straight into a *restricted* area does still tell them, because they're about to lose sight of channels and silence would be worse than a message. `notifications.test.ts` pins both halves.
+
+The one thing not on the list is a report to whoever ran `/standing-revert`, sent only if the revert deleted the channel the command was typed in. That never reaches a member.
 
 ### Maintenance mode
 
@@ -338,7 +359,8 @@ src/
     channel-tidy.ts         keeps the public channel down to the pinned guide
     king-panel.ts           publishes the pinned admin control panel
     king-stats.ts           the admin snapshot: counts only, never names
-    join-notice.ts          the one-time launch DM, fired on first voice join
+    join-notice.ts          the one-time "this exists" DM: arrival + first voice
+    notifications.test.ts   what counts as news worth DMing a member about
     maintenance.ts          pause/resume: hide the surface, keep all the data
   handlers/                 interaction handlers (rating, challenge, participation)
     guards.ts               the KING role + KING channel gate on admin commands

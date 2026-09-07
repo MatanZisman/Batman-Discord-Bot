@@ -189,10 +189,14 @@ async function doAdjust(interaction: StringSelectMenuInteraction): Promise<void>
       ? ` **${preview.reportsToUndo}** more report(s) at the top of the scale would put them back.`
       : '';
 
+  const blocked = preview.blockedBy
+    ? `\n\n**Their area did not move, and will not on this alone:** ${preview.blockedBy}. Adjustments move the score and never the headcount or consensus gates, so pressure cannot place somebody the community has not actually rated. The score is recorded and will take effect the moment enough real people have weighed in.`
+    : '';
+
   await finish(
     interaction,
     [
-      `<@${targetId}> is now in **${areaName(outcome.appliedTierIndex)}** at **${preview.projectedScore.toFixed(2)}**, from ${preview.currentScore.toFixed(2)}.${undo}`,
+      `<@${targetId}> is now in **${areaName(outcome.appliedTierIndex)}** at **${preview.projectedScore.toFixed(2)}**, from ${preview.currentScore.toFixed(2)}.${undo}${blocked}`,
       '',
       `The community score never stopped running, so this can be outvoted rather than waited out. It fades over ${CREDITS.LIFETIME_DAYS} days. ${outcome.moved ? 'They were told their area changed, with no reason given and no mention of who decided.' : 'Their area did not move, so they were told nothing.'}`,
     ].join('\n'),

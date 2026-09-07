@@ -10,8 +10,8 @@ import {
 import { DAY_MS, LIMITS, MINUTE_MS, SCORING, tierAt, tierIndexByKey } from '../config.js';
 import * as repo from '../db/repo.js';
 import { logAction } from '../core/action-log.js';
-import { computeStanding, explainStanding } from '../core/scoring.js';
-import { collectVoteInputs, recalculateStanding } from '../core/standing-service.js';
+import { explainStanding } from '../core/scoring.js';
+import { evaluateStanding, recalculateStanding } from '../core/standing-service.js';
 import { logger } from '../lib/logger.js';
 import {
   buildPlayerPicker,
@@ -228,9 +228,7 @@ export async function showOwnStanding(
     return;
   }
 
-  const currentTierIndex = record.tier_key ? tierIndexByKey(record.tier_key) : null;
-  const inputs = await collectVoteInputs(guild, interaction.user.id);
-  const standing = computeStanding(inputs, Date.now(), currentTierIndex);
+  const { standing } = await evaluateStanding(guild, interaction.user.id, record);
 
   const lines = [
     `**Your ${tierAt(standing.tierIndex).roleName} standing**`,

@@ -11,7 +11,11 @@ import {
 } from 'discord.js';
 import { COMMANDS } from './commands.js';
 import { flushAllLogs } from './core/action-log.js';
-import { isFreshVoiceJoin, maybeSendJoinNotice } from './core/join-notice.js';
+import {
+  isFreshVoiceJoin,
+  maybeSendArrivalNotice,
+  maybeSendJoinNotice,
+} from './core/join-notice.js';
 import { recalculateStanding } from './core/standing-service.js';
 import { closeDatabase, openDatabase } from './db/index.js';
 import * as repo from './db/repo.js';
@@ -62,11 +66,17 @@ client.on(Events.InteractionCreate, (interaction) => {
   void routeInteraction(interaction);
 });
 
-// New members start in the first tier with a clean slate.
+// New members start in the first tier with a clean slate, and are the one
+// group the launch announcement can never have reached, so they are introduced
+// to the system on arrival.
 client.on(Events.GuildMemberAdd, async (member: GuildMember) => {
   repo.ensureMember(member.guild.id, member.id, member.joinedTimestamp ?? Date.now());
   await recalculateStanding(member.guild, member.id, { notifyUser: false }).catch((error) =>
     logger.error(`Could not initialise standing for ${member.id}`, error),
+  );
+
+  await maybeSendArrivalNotice(member).catch((error) =>
+    logger.error(`Arrival notice failed for ${member.id}`, error),
   );
 });
 
