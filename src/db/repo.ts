@@ -8,7 +8,10 @@ export interface GuildSettings {
   guild_id: string;
   rating_channel_id: string | null;
   king_role_id: string | null;
+  /** Where challenge reports and the action log go. */
   king_channel_id: string | null;
+  /** Where the live stats-and-menu message lives. */
+  king_menu_channel_id?: string | null;
   setup_at: number | null;
   /** Non-null while the system is paused for maintenance. */
   paused_at?: number | null;
@@ -37,11 +40,13 @@ export interface MemberRecord {
   rater_count: number;
   first_seen_at: number;
   updated_at: number;
-  /** Tier forced by the KING role, or null. */
-  override_tier_key: string | null;
-  /** Epoch ms at which the override lapses. */
-  override_until: number | null;
-  /** Epoch ms of this member's last move to a worse tier. */
+  /**
+   * Epoch ms of this member's last move to a worse tier.
+   *
+   * (The override_* columns still exist on the table but are not declared
+   * here. Two retired mechanisms wrote them; nothing reads them now, and a
+   * moderator's influence lives in score_credits instead.)
+   */
   last_demotion_at: number | null;
 }
 
@@ -59,7 +64,15 @@ export interface VoteRecord {
   updated_at: number;
 }
 
-export type ChallengeState = 'collecting' | 'king_review' | 'closed';
+/**
+ * 'open' is waiting on a KING; 'closed' is settled.
+ *
+ * 'collecting' and 'king_review' are the two phases of the older flow, which
+ * DMed past raters and then gave the KING a second window. Nothing creates
+ * them any more, but rows written before the change still carry them, so they
+ * are kept in the type and treated as open everywhere.
+ */
+export type ChallengeState = 'open' | 'collecting' | 'king_review' | 'closed';
 
 export interface ChallengeRecord {
   id: number;
@@ -108,15 +121,20 @@ export function getGuildSettings(guildId: string): GuildSettings | undefined {
 export function saveGuildSettings(settings: Omit<GuildSettings, 'setup_at'> & { setup_at?: number }): void {
   getDatabase()
     .prepare(
-      `INSERT INTO guilds (guild_id, rating_channel_id, king_role_id, king_channel_id, setup_at)
-       VALUES (@guild_id, @rating_channel_id, @king_role_id, @king_channel_id, @setup_at)
+      `INSERT INTO guilds (guild_id, rating_channel_id, king_role_id, king_channel_id, king_menu_channel_id, setup_at)
+       VALUES (@guild_id, @rating_channel_id, @king_role_id, @king_channel_id, @king_menu_channel_id, @setup_at)
        ON CONFLICT(guild_id) DO UPDATE SET
-         rating_channel_id = excluded.rating_channel_id,
-         king_role_id      = excluded.king_role_id,
-         king_channel_id   = excluded.king_channel_id,
-         setup_at          = excluded.setup_at`,
+         rating_channel_id    = excluded.rating_channel_id,
+         king_role_id         = excluded.king_role_id,
+         king_channel_id      = excluded.king_channel_id,
+         king_menu_channel_id = excluded.king_menu_channel_id,
+         setup_at             = excluded.setup_at`,
     )
-    .run({ ...settings, setup_at: settings.setup_at ?? Date.now() });
+    .run({
+      king_menu_channel_id: null,
+      ...settings,
+      setup_at: settings.setup_at ?? Date.now(),
+    });
 }
 
 /**
@@ -319,32 +337,156 @@ export function saveStanding(
 }
 
 /**
- * Members the sweeper should re-evaluate: anyone carrying ratings, or anyone
- * not in the default tier. This is what lets a deferred demotion land, and
- * what picks up the knock-on effect of a rater's own standing changing.
+ * Members the sweeper should re-evaluate: anyone carrying ratings, anyone not
+ * in the default tier, and anyone who has ever been adjusted. This is what
+ * lets a deferred demotion land, what picks up the knock-on effect of a
+ * rater's own standing changing, and what makes an adjustment fade out on
+ * schedule instead of on the next vote.
  */
 export function listMembersToResweep(guildId: string, defaultTierKey: string): MemberRecord[] {
   return getDatabase()
     .prepare<[string, string], MemberRecord>(
       `SELECT * FROM members
         WHERE guild_id = ? AND participating = 1
-          AND (rater_count > 0 OR tier_key IS NOT ? )`,
+          AND (
+            rater_count > 0
+            OR tier_key IS NOT ?
+            OR user_id IN (SELECT target_id FROM score_credits WHERE guild_id = members.guild_id)
+          )`,
     )
     .all(guildId, defaultTierKey);
 }
 
-/** Records or clears a KING placement override. Pass null to clear. */
-export function setTierOverride(
-  guildId: string,
-  userId: string,
-  tierKey: string | null,
-  until: number | null,
-): void {
-  getDatabase()
+/* -------------------------------------------------------------------------- */
+/* Moderator adjustments                                                      */
+/* -------------------------------------------------------------------------- */
+
+export interface ScoreCreditRecord {
+  id: number;
+  guild_id: string;
+  target_id: string;
+  /** SCORING.MIN_RATING for relief, MAX_RATING for pressure. */
+  value: number;
+  /** Reports' worth. */
+  reports: number;
+  granted_by: string;
+  reason: string | null;
+  created_at: number;
+  expires_at: number;
+  revoked_at: number | null;
+  revoked_by: string | null;
+}
+
+export function grantCredit(input: {
+  guildId: string;
+  targetId: string;
+  value: number;
+  reports: number;
+  grantedBy: string;
+  reason?: string | null;
+  expiresAt: number;
+}): number {
+  const result = getDatabase()
     .prepare(
-      'UPDATE members SET override_tier_key = ?, override_until = ?, updated_at = ? WHERE guild_id = ? AND user_id = ?',
+      `INSERT INTO score_credits
+         (guild_id, target_id, value, reports, granted_by, reason, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(tierKey, until, Date.now(), guildId, userId);
+    .run(
+      input.guildId,
+      input.targetId,
+      input.value,
+      input.reports,
+      input.grantedBy,
+      input.reason ?? null,
+      Date.now(),
+      input.expiresAt,
+    );
+
+  return Number(result.lastInsertRowid);
+}
+
+/** Adjustments currently counting toward a member's score. */
+export function listLiveCredits(
+  guildId: string,
+  targetId: string,
+  now: number = Date.now(),
+): ScoreCreditRecord[] {
+  return getDatabase()
+    .prepare<[string, string, number], ScoreCreditRecord>(
+      `SELECT * FROM score_credits
+        WHERE guild_id = ? AND target_id = ?
+          AND revoked_at IS NULL
+          AND expires_at > ?
+        ORDER BY created_at DESC`,
+    )
+    .all(guildId, targetId, now);
+}
+
+/** Everything ever granted to a member, live or not, newest first. */
+export function listCreditHistory(
+  guildId: string,
+  targetId: string,
+  limit = 10,
+): ScoreCreditRecord[] {
+  return getDatabase()
+    .prepare<[string, string, number], ScoreCreditRecord>(
+      `SELECT * FROM score_credits
+        WHERE guild_id = ? AND target_id = ?
+        ORDER BY created_at DESC
+        LIMIT ?`,
+    )
+    .all(guildId, targetId, limit);
+}
+
+/**
+ * Takes back every live adjustment on a member.
+ *
+ * Revoked rather than deleted. A moderator undoing their own call is part of
+ * the record, and a table that only ever shows grants would quietly overstate
+ * how much intervention actually stuck.
+ */
+export function revokeCreditsFor(guildId: string, targetId: string, byUserId: string): number {
+  const result = getDatabase()
+    .prepare(
+      `UPDATE score_credits
+          SET revoked_at = ?, revoked_by = ?
+        WHERE guild_id = ? AND target_id = ?
+          AND revoked_at IS NULL
+          AND expires_at > ?`,
+    )
+    .run(Date.now(), byUserId, guildId, targetId, Date.now());
+
+  return result.changes;
+}
+
+/** Members carrying at least one live adjustment. */
+export function listMembersWithLiveCredits(guildId: string, now: number = Date.now()): string[] {
+  return getDatabase()
+    .prepare<[string, number], { target_id: string }>(
+      `SELECT DISTINCT target_id FROM score_credits
+        WHERE guild_id = ? AND revoked_at IS NULL AND expires_at > ?`,
+    )
+    .all(guildId, now)
+    .map((row) => row.target_id);
+}
+
+/**
+ * Members whose adjustment ran out since the sweeper last looked.
+ *
+ * Expiry is a timestamp, not an event, so nothing happens on its own when one
+ * passes: the score is simply computed differently from that moment on. This
+ * is what tells the sweeper whose roles are now stale.
+ */
+export function listMembersWithLapsedCredits(guildId: string, since: number): string[] {
+  return getDatabase()
+    .prepare<[string, number, number], { target_id: string }>(
+      `SELECT DISTINCT target_id FROM score_credits
+        WHERE guild_id = ? AND revoked_at IS NULL
+          AND expires_at > ? AND expires_at <= ?`,
+    )
+    .all(guildId, since, Date.now())
+    .map((row) => row.target_id);
 }
 
 export function listParticipatingMembers(guildId: string): MemberRecord[] {
@@ -588,7 +730,7 @@ export function createChallenge(input: {
   const result = getDatabase()
     .prepare(
       `INSERT INTO challenges (guild_id, target_id, state, opened_at, response_deadline, snapshot_json)
-       VALUES (?, ?, 'collecting', ?, ?, ?)`,
+       VALUES (?, ?, 'open', ?, ?, ?)`,
     )
     .run(input.guildId, input.targetId, Date.now(), input.responseDeadline, JSON.stringify(input.snapshot));
   return Number(result.lastInsertRowid);
@@ -631,12 +773,15 @@ export function updateChallenge(id: number, patch: Partial<ChallengeRecord>): vo
 
 export function listChallengesNeedingAttention(now: number): ChallengeRecord[] {
   return getDatabase()
-    .prepare<[number, number], ChallengeRecord>(
+    .prepare<[number], ChallengeRecord>(
+      // COALESCE covers rows from the older two-phase flow: those in
+      // 'king_review' carry a king_deadline, everything else is judged on the
+      // request deadline. One query, no special cases.
       `SELECT * FROM challenges
-        WHERE (state = 'collecting'  AND response_deadline <= ?)
-           OR (state = 'king_review' AND king_deadline <= ?)`,
+        WHERE state != 'closed'
+          AND COALESCE(king_deadline, response_deadline) <= ?`,
     )
-    .all(now, now);
+    .all(now);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -726,6 +871,7 @@ export function clearGuildData(guildId: string): number {
     for (const table of [
       'challenges',
       'votes',
+      'score_credits',
       'members',
       'tier_roles',
       'provisioned_items',

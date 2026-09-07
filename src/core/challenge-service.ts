@@ -1,43 +1,49 @@
-import {
-  type Client,
-  type Guild,
-  type GuildMember,
-  type TextChannel,
-} from 'discord.js';
-import { DAY_MS, HOUR_MS, LIMITS, SERVER_LAYOUT, tierAt, tierIndexByKey } from '../config.js';
+import { type Client, type Guild, type GuildMember, type TextChannel } from 'discord.js';
+import { DAY_MS, HOUR_MS, LIMITS, tierAt, tierIndexByKey } from '../config.js';
 import * as repo from '../db/repo.js';
 import { logger } from '../lib/logger.js';
-import { buildChallengeOpened, buildChallengeRequestDm, buildKingReport } from '../ui/challenge.js';
+import { buildKingRequest } from '../ui/challenge.js';
 import { logAction } from './action-log.js';
+import {
+  applyAdjustment,
+  clearAdjustments,
+  describeLiveAdjustments,
+  previewSizes,
+  type AdjustmentOutcome,
+  type Direction,
+} from './adjustments.js';
 import { recalculateStanding } from './standing-service.js';
 
 /**
  * ============================================================================
- *  RE-REVIEW ("CHALLENGE") WORKFLOW
+ *  ASKING FOR A REVIEW
  * ============================================================================
- *  A rated player may ask, at most once every CHALLENGE_COOLDOWN_DAYS, for
- *  their raters to take another look.
+ *  A rated player may ask, at most once every CHALLENGE_COOLDOWN_DAYS, for the
+ *  KING role to take another look at their value.
  *
- *  Phase 1 — collecting  (CHALLENGE_RESPONSE_WINDOW_HOURS)
- *      Everyone holding a current rating on the player is DMed privately.
- *      They can re-rate, or explicitly keep what they had. The KING channel
- *      gets a notice that a review is running, with no action required.
+ *  It is one step. The request is posted to the KING channel and pings the
+ *  role; a KING either sets the player's toxicity value by hand or dismisses
+ *  it. Nothing is asked of anybody else.
  *
- *  Phase 2 — king_review  (KING_REVIEW_WINDOW_HOURS)
- *      Anyone who never answered has their rating removed: an unanswered
- *      rating is treated as stale rather than as a vote. The standing is
- *      recomputed and posted to the KING channel, where the KING role can
- *      accept it, undo the whole review, or place the player manually.
+ *  WHY NO RATERS ARE CONTACTED
+ *  The previous design DMed every past rater asking them to look again, and
+ *  dropped the rating of anyone who did not reply. Three things were wrong
+ *  with that. It turned one person's request into unsolicited DMs for a dozen
+ *  others, which is the kind of thing that gets a bot blocked and members
+ *  irritated. It made silence load-bearing: a rater on holiday had their
+ *  honest rating deleted, so the reliable way to win a review was to be rated
+ *  by inattentive people. And it leaked timing — a DM arriving told you
+ *  someone you had rated was unhappy, which is a step towards working out who.
  *
- *  Phase 3 — closed
- *      Silence from the KING accepts the outcome. The player is told the
- *      result privately, and only ever the result.
+ *  WHAT THE PLAYER IS PROMISED
+ *  Nothing. They are told the request was sent and that any change will show
+ *  up within a day. No reply, no outcome message, no reasons. An ignored
+ *  request lapsing is a legitimate outcome, and promising a verdict would
+ *  create an obligation on volunteers that nobody agreed to.
  * ============================================================================
  */
 
-export type OpenChallengeOutcome =
-  | { ok: true; voterCount: number; deadline: number; message: string }
-  | { ok: false; message: string };
+export type OpenChallengeOutcome = { ok: true; message: string } | { ok: false; message: string };
 
 export async function openChallenge(guild: Guild, member: GuildMember): Promise<OpenChallengeOutcome> {
   const record = repo.ensureMember(guild.id, member.id, member.joinedTimestamp ?? Date.now());
@@ -59,9 +65,7 @@ export async function openChallenge(guild: Guild, member: GuildMember): Promise<
   if (previous && previous.state !== 'closed') {
     return {
       ok: false,
-      message: `You already have a review running. It closes <t:${Math.floor(
-        (previous.king_deadline ?? previous.response_deadline) / 1000,
-      )}:R>.`,
+      message: 'You already have a request waiting with the moderators. Asking again will not make it move faster.',
     };
   }
 
@@ -82,180 +86,141 @@ export async function openChallenge(guild: Guild, member: GuildMember): Promise<
     };
   }
 
-  const deadline = Date.now() + LIMITS.CHALLENGE_RESPONSE_WINDOW_HOURS * HOUR_MS;
-
+  // Kept as a record of what was disputed, so a KING reading the request later
+  // can see the state it was made in.
   const snapshot: repo.ChallengeSnapshot = {
     tier_key: record.tier_key,
     score: record.score,
     rater_count: record.rater_count,
-    votes: repo.getVotesForTarget(guild.id, member.id).map((v) => ({
-      rater_id: v.rater_id,
-      value: v.value,
-      status: v.status,
-      updated_at: v.updated_at,
-    })),
+    votes: [],
   };
 
   const challengeId = repo.createChallenge({
     guildId: guild.id,
     targetId: member.id,
-    responseDeadline: deadline,
+    responseDeadline: Date.now() + LIMITS.CHALLENGE_REQUEST_WINDOW_HOURS * HOUR_MS,
     snapshot,
   });
 
-  for (const vote of activeVotes) {
-    repo.addChallengeVoter(challengeId, vote.rater_id, vote.value);
-  }
-
-  const playerName = member.displayName;
-  let reachable = 0;
-
-  for (const vote of activeVotes) {
-    const rater = await guild.members.fetch(vote.rater_id).catch(() => null);
-    if (!rater) {
-      repo.setChallengeVoterResponse(challengeId, vote.rater_id, 'unreachable');
-      continue;
-    }
-
-    try {
-      await rater.send(
-        buildChallengeRequestDm({ challengeId, playerName, guildName: guild.name, deadline }),
-      );
-      reachable += 1;
-    } catch {
-      // Closed DMs. Their rating cannot be reaffirmed, so it will be treated
-      // like any other unanswered rating when the window closes.
-      repo.setChallengeVoterResponse(challengeId, vote.rater_id, 'unreachable');
-      logger.debug(`Could not DM rater ${vote.rater_id} for challenge ${challengeId}`);
-    }
-  }
-
-  await postKingNotice(guild, challengeId);
-  repo.audit(guild.id, 'challenge_opened', member.id, `voters=${activeVotes.length}`);
-  logAction(guild, { kind: 'challenge_opened', actorId: member.id, invited: activeVotes.length });
+  await postKingRequest(guild, challengeId);
+  repo.audit(guild.id, 'challenge_opened', member.id);
+  logAction(guild, { kind: 'challenge_opened', actorId: member.id, invited: 0 });
 
   return {
     ok: true,
-    voterCount: activeVotes.length,
-    deadline,
-    message: buildChallengeOpened(reachable, deadline),
+    message: [
+      '**Your request has been sent to the moderators.**',
+      '',
+      'Your rating will be reviewed. If it is accepted you will see the change within 24 hours.',
+      '',
+      `Nobody who rated you has been contacted, and nobody has been told you asked. You can ask again in ${LIMITS.CHALLENGE_COOLDOWN_DAYS} days.`,
+    ].join('\n'),
   };
 }
 
-/** Records that a rater wants to keep the rating they already gave. */
-export async function reaffirmRating(
-  client: Client,
-  challenge: repo.ChallengeRecord,
-  raterId: string,
-): Promise<void> {
-  const vote = repo.getVote(challenge.guild_id, raterId, challenge.target_id);
-  if (vote) repo.touchVote(vote.id);
-  repo.setChallengeVoterResponse(challenge.id, raterId, 'kept');
+/* -------------------------------------------------------------------------- */
+/* Resolution                                                                 */
+/* -------------------------------------------------------------------------- */
 
-  const guild = await client.guilds.fetch(challenge.guild_id).catch(() => null);
-  if (guild) logAction(guild, { kind: 'challenge_kept', actorId: raterId });
-}
-
-/** Records a fresh rating cast during a review. Bypasses the normal cooldown. */
-export async function recordReRating(
-  client: Client,
-  challenge: repo.ChallengeRecord,
-  raterId: string,
-  value: number,
-): Promise<void> {
-  repo.upsertVote(challenge.guild_id, raterId, challenge.target_id, value);
-  repo.setChallengeVoterResponse(challenge.id, raterId, 'rerated');
-
-  const guild = await client.guilds.fetch(challenge.guild_id).catch(() => null);
-  if (!guild) return;
-
-  logAction(guild, { kind: 'challenge_rerated', actorId: raterId });
-  await recalculateStanding(guild, challenge.target_id, { notifyUser: false });
-}
+export type KingDecision =
+  | { type: 'adjust'; direction: Direction; reports: number }
+  | { type: 'clear' }
+  | { type: 'dismiss' }
+  | { type: 'lapsed' };
 
 /**
- * Phase 1 -> Phase 2. Drops unanswered ratings, recomputes, and hands the
- * outcome to the KING role.
+ * Applies a KING's decision and closes the request.
+ *
+ * Deliberately sends the player nothing beyond what any member gets. If the
+ * adjustment moved their area, the ordinary tier-change notice fires on its
+ * own — the same neutral message the community produces, with no hint that it
+ * followed a request. That is the whole point: a review that succeeds is
+ * indistinguishable from people easing off.
  */
-export async function closeResponseWindow(client: Client, challenge: repo.ChallengeRecord): Promise<void> {
-  const guild = await client.guilds.fetch(challenge.guild_id).catch(() => null);
-  if (!guild) return;
-
-  const voters = repo.getChallengeVoters(challenge.id);
-
-  for (const voter of voters) {
-    if (voter.response !== 'pending' && voter.response !== 'unreachable') continue;
-
-    const vote = repo.getVote(challenge.guild_id, voter.rater_id, challenge.target_id);
-    if (vote && vote.status === 'active') repo.setVoteStatus(vote.id, 'dropped');
-    repo.setChallengeVoterResponse(challenge.id, voter.rater_id, 'dropped');
-  }
-
-  const result = await recalculateStanding(guild, challenge.target_id, { notifyUser: false });
-  const kingDeadline = Date.now() + LIMITS.KING_REVIEW_WINDOW_HOURS * HOUR_MS;
-
-  repo.updateChallenge(challenge.id, { state: 'king_review', king_deadline: kingDeadline });
-  repo.audit(challenge.guild_id, 'challenge_window_closed', challenge.target_id, result?.standing.tierKey);
-
-  await postKingDecision(guild, challenge.id);
-}
-
-export type KingAction = { type: 'accept' } | { type: 'revert' } | { type: 'place'; tierKey: string };
-
-/**
- * Phase 2 -> Phase 3. Applies the KING's decision, or the default acceptance
- * when the window lapses, then tells the player the result and nothing else.
- */
-export async function finalizeChallenge(
+export async function resolveChallenge(
   client: Client,
   challenge: repo.ChallengeRecord,
-  action: KingAction,
+  decision: KingDecision,
   kingUserId?: string,
 ): Promise<void> {
   const guild = await client.guilds.fetch(challenge.guild_id).catch(() => null);
   if (!guild) return;
 
-  if (action.type === 'revert') {
-    const snapshot = JSON.parse(challenge.snapshot_json) as repo.ChallengeSnapshot;
-    for (const vote of snapshot.votes) {
-      repo.restoreVote(
-        challenge.guild_id,
-        vote.rater_id,
-        challenge.target_id,
-        vote.value,
-        vote.status,
-        vote.updated_at,
-      );
-    }
-    repo.setTierOverride(challenge.guild_id, challenge.target_id, null, null);
+  let outcome: AdjustmentOutcome | null = null;
+
+  if (decision.type === 'adjust' && kingUserId) {
+    outcome = await applyAdjustment(
+      guild,
+      challenge.target_id,
+      decision.direction,
+      decision.reports,
+      kingUserId,
+      'review request',
+    ).catch((error) => {
+      logger.error(`Applying a review adjustment failed for ${challenge.target_id}`, error);
+      return null;
+    });
   }
 
-  if (action.type === 'place') {
-    repo.setTierOverride(
-      challenge.guild_id,
-      challenge.target_id,
-      action.tierKey,
-      Date.now() + LIMITS.KING_OVERRIDE_DAYS * DAY_MS,
-    );
+  if (decision.type === 'clear' && kingUserId) {
+    await clearAdjustments(guild, challenge.target_id, kingUserId).catch(() => 0);
   }
 
   repo.updateChallenge(challenge.id, {
     state: 'closed',
     closed_at: Date.now(),
-    king_action: action.type === 'place' ? `place:${action.tierKey}` : action.type,
+    king_action:
+      decision.type === 'adjust' ? `${decision.direction}:${decision.reports}` : decision.type,
     king_user_id: kingUserId ?? null,
   });
 
-  const result = await recalculateStanding(guild, challenge.target_id, { notifyUser: false });
+  // Nothing changed the member's inputs on a dismissal or a lapse, but their
+  // votes may have aged in the meantime, so this runs either way.
+  if (!outcome) {
+    await recalculateStanding(guild, challenge.target_id).catch((error) =>
+      logger.error(`Recalculation after a review failed for ${challenge.target_id}`, error),
+    );
+  }
+
   repo.audit(
     challenge.guild_id,
     'challenge_closed',
     challenge.target_id,
-    `${action.type}${kingUserId ? ' by king' : ' by timeout'}`,
+    `${decision.type}${kingUserId ? ' by king' : ' automatically'}`,
   );
 
-  await notifyChallengeOutcome(guild, challenge, result?.standing.tierKey ?? null, action);
-  await clearKingButtons(guild, challenge.id, action, kingUserId);
+  if (kingUserId) {
+    logAction(guild, {
+      kind: 'admin',
+      actorId: kingUserId,
+      summary:
+        decision.type === 'adjust'
+          ? `${decision.direction === 'ease' ? 'eased' : 'pushed'} a review request by ${decision.reports} report(s)' worth`
+          : decision.type === 'clear'
+            ? 'took back the adjustments behind a review request'
+            : 'dismissed a review request',
+    });
+  }
+
+  await settleRequestMessage(guild, challenge.id, decision, kingUserId);
+}
+
+/**
+ * Closes requests nobody acted on. Called by the sweeper.
+ *
+ * A lapsed request is not a rejection and is not reported to the player, who
+ * was never promised an answer. It only stops the queue growing forever.
+ */
+export async function expireStaleRequests(client: Client): Promise<number> {
+  const stale = repo.listChallengesNeedingAttention(Date.now());
+  let closed = 0;
+
+  for (const challenge of stale) {
+    await resolveChallenge(client, challenge, { type: 'lapsed' });
+    closed += 1;
+  }
+
+  return closed;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -270,36 +235,28 @@ async function getKingChannel(guild: Guild): Promise<TextChannel | null> {
   return channel && channel.isTextBased() ? (channel as TextChannel) : null;
 }
 
-function tallyResponses(challengeId: number) {
-  const voters = repo.getChallengeVoters(challengeId);
-  return {
-    invited: voters.length,
-    rerated: voters.filter((v) => v.response === 'rerated').length,
-    kept: voters.filter((v) => v.response === 'kept').length,
-    dropped: voters.filter((v) => v.response === 'dropped').length,
-    pending: voters.filter((v) => v.response === 'pending' || v.response === 'unreachable').length,
-  };
-}
-
-async function postKingNotice(guild: Guild, challengeId: number): Promise<void> {
+async function postKingRequest(guild: Guild, challengeId: number): Promise<void> {
   const channel = await getKingChannel(guild);
   const challenge = repo.getChallenge(challengeId);
   if (!channel || !challenge) return;
 
-  const snapshot = JSON.parse(challenge.snapshot_json) as repo.ChallengeSnapshot;
   const settings = repo.getGuildSettings(guild.id);
+  const record = repo.getMember(challenge.guild_id, challenge.target_id);
+
+  // The request arrives already priced. A KING should not have to open a
+  // second screen, or do arithmetic, to know what each option costs.
+  const options = await previewSizes(guild, challenge.target_id).catch(() => []);
 
   const message = await channel.send({
     content: settings?.king_role_id ? `<@&${settings.king_role_id}>` : undefined,
-    ...buildKingReport({
+    ...buildKingRequest({
       challengeId,
       playerId: challenge.target_id,
-      state: 'collecting',
-      ...tallyResponses(challengeId),
-      beforeTierKey: snapshot.tier_key,
-      afterTierKey: snapshot.tier_key,
-      beforeScore: snapshot.score,
-      afterScore: snapshot.score,
+      tierKey: record?.tier_key ?? null,
+      score: record?.score ?? null,
+      raterCount: record?.rater_count ?? 0,
+      liveAdjustments: describeLiveAdjustments(challenge.guild_id, challenge.target_id),
+      options,
       deadline: challenge.response_deadline,
     }),
   });
@@ -307,40 +264,11 @@ async function postKingNotice(guild: Guild, challengeId: number): Promise<void> 
   repo.updateChallenge(challengeId, { king_message_id: message.id, king_channel_id: channel.id });
 }
 
-async function postKingDecision(guild: Guild, challengeId: number): Promise<void> {
-  const channel = await getKingChannel(guild);
-  const challenge = repo.getChallenge(challengeId);
-  if (!channel || !challenge) return;
-
-  const snapshot = JSON.parse(challenge.snapshot_json) as repo.ChallengeSnapshot;
-  const current = repo.getMember(challenge.guild_id, challenge.target_id);
-  const settings = repo.getGuildSettings(guild.id);
-
-  const payload = buildKingReport({
-    challengeId,
-    playerId: challenge.target_id,
-    state: 'king_review',
-    ...tallyResponses(challengeId),
-    beforeTierKey: snapshot.tier_key,
-    afterTierKey: current?.tier_key ?? null,
-    beforeScore: snapshot.score,
-    afterScore: current?.score ?? null,
-    deadline: challenge.king_deadline,
-  });
-
-  const message = await channel.send({
-    content: settings?.king_role_id ? `<@&${settings.king_role_id}>` : undefined,
-    ...payload,
-  });
-
-  repo.updateChallenge(challengeId, { king_message_id: message.id, king_channel_id: channel.id });
-}
-
-/** Strips the decision buttons once a challenge is settled. */
-async function clearKingButtons(
+/** Replaces the request's buttons with what was decided. */
+async function settleRequestMessage(
   guild: Guild,
   challengeId: number,
-  action: KingAction,
+  decision: KingDecision,
   kingUserId?: string,
 ): Promise<void> {
   const challenge = repo.getChallenge(challengeId);
@@ -353,54 +281,19 @@ async function clearKingButtons(
   if (!message) return;
 
   const verdict =
-    action.type === 'accept'
-      ? 'Outcome accepted'
-      : action.type === 'revert'
-        ? 'Review undone, previous ratings restored'
-        : `Placed manually in ${tierAt(tierIndexByKey(action.tierKey)).roleName}`;
+    decision.type === 'adjust'
+      ? `${decision.direction === 'ease' ? 'eased' : 'pushed'} by **${decision.reports}** report(s)' worth`
+      : decision.type === 'clear'
+        ? 'adjustments taken back'
+        : decision.type === 'dismiss'
+          ? 'dismissed, no change'
+          : `closed with no action after ${LIMITS.CHALLENGE_REQUEST_WINDOW_HOURS} hours`;
 
   await message
     .edit({
-      content: `**Settled:** ${verdict}${kingUserId ? ` by <@${kingUserId}>` : ' automatically'}.`,
+      content: `**Settled:** ${verdict}${kingUserId ? ` — <@${kingUserId}>` : ''}.`,
       components: [],
     })
     .catch(() => undefined);
 }
 
-async function notifyChallengeOutcome(
-  guild: Guild,
-  challenge: repo.ChallengeRecord,
-  tierKey: string | null,
-  action: KingAction,
-): Promise<void> {
-  const member = await guild.members.fetch(challenge.target_id).catch(() => null);
-  if (!member) return;
-
-  const tally = tallyResponses(challenge.id);
-  const tierName = tierKey ? tierAt(tierIndexByKey(tierKey)).roleName : 'unchanged';
-
-  const lines = [
-    '**Your re-review is complete.**',
-    '',
-    `Your standing is now **${tierName}**.`,
-    `${tally.rerated} of your raters rated you again, ${tally.kept} kept what they had, and ${tally.dropped} did not answer, so their ratings were removed.`,
-  ];
-
-  if (action.type === 'revert') {
-    lines.push(
-      '',
-      `The ${SERVER_LAYOUT.kingRoleName} role rolled this review back, so your previous ratings still stand. You can ask again after the usual waiting period.`,
-    );
-  }
-
-  if (action.type === 'place') {
-    lines.push(
-      '',
-      `The ${SERVER_LAYOUT.kingRoleName} role set your placement directly for the next ${LIMITS.KING_OVERRIDE_DAYS} days.`,
-    );
-  }
-
-  lines.push('', 'You were never shown who rated you, and they were never shown what you asked.');
-
-  await member.send(lines.join('\n')).catch(() => undefined);
-}

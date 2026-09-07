@@ -28,4 +28,6 @@ export const NS = {
   KING: 'king',
   PARTICIPATION: 'part',
   REVERT: 'revert',
+  /** The KING control panel in #kings-menu. */
+  MENU: 'menu',
 } as const;

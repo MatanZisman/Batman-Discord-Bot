@@ -3,7 +3,7 @@ import { DEFAULT_TIER_INDEX, SCORING, tierAt, tierIndexByKey } from '../config.j
 import * as repo from '../db/repo.js';
 import { logger } from '../lib/logger.js';
 import { logAction } from './action-log.js';
-import { computeStanding, type Standing, type VoteInput } from './scoring.js';
+import { computeStanding, type CreditInput, type Standing, type VoteInput } from './scoring.js';
 
 /**
  * Glue between the pure scoring engine and Discord. This module owns the
@@ -48,19 +48,22 @@ export async function collectVoteInputs(guild: Guild, targetId: string): Promise
   return inputs;
 }
 
+/** Live moderator adjustments, in the shape the scoring engine wants. */
+export function collectCredits(guildId: string, targetId: string): CreditInput[] {
+  return repo.listLiveCredits(guildId, targetId).map((credit) => ({
+    value: credit.value,
+    reports: credit.reports,
+    grantedAt: credit.created_at,
+    expiresAt: credit.expires_at,
+  }));
+}
+
 export interface RecalculationResult {
   standing: Standing;
   previousTierIndex: number | null;
   changed: boolean;
-  /** True when a live KING override, not the score, decided the placement. */
-  overridden: boolean;
-}
-
-/** Returns the tier a live KING override pins the member to, if any. */
-function activeOverrideTier(record: repo.MemberRecord): number | null {
-  if (!record.override_tier_key) return null;
-  if (record.override_until !== null && record.override_until < Date.now()) return null;
-  return tierIndexByKey(record.override_tier_key);
+  /** True when a moderator adjustment is part of the score behind this result. */
+  adjusted: boolean;
 }
 
 /**
@@ -83,32 +86,33 @@ export async function recalculateStanding(
 
   const previousTierIndex = record.tier_key ? tierIndexByKey(record.tier_key) : null;
   const inputs = await collectVoteInputs(guild, userId);
+  const credits = collectCredits(guild.id, userId);
+
+  // One path, always. A moderator's adjustment is an argument inside this
+  // call, not a branch around it, so there is no such thing as a standing the
+  // engine did not produce and no second placement rule to keep in step.
   const standing = computeStanding(inputs, Date.now(), previousTierIndex, {
     // The newcomer ramp is relative to the community's own age, so a young
     // server does not silence everybody in it.
     communityAgeMs: Date.now() - guild.createdTimestamp,
     lastDemotionAt: record.last_demotion_at,
+    credits,
   });
 
-  // A KING override wins over the computed tier until it lapses. The score is
-  // still recorded so the community signal keeps accumulating underneath.
-  const override = activeOverrideTier(record);
-  const appliedTierIndex = override ?? standing.tierIndex;
-  const appliedTierKey = tierAt(appliedTierIndex).key;
+  const tierKey = tierAt(standing.tierIndex).key;
+  const isDemotion = previousTierIndex !== null && standing.tierIndex > previousTierIndex;
+  repo.saveStanding(guild.id, userId, tierKey, standing.score, standing.raterCount, isDemotion);
 
-  const isDemotion = previousTierIndex !== null && appliedTierIndex > previousTierIndex;
-  repo.saveStanding(guild.id, userId, appliedTierKey, standing.score, standing.raterCount, isDemotion);
+  if (member) await applyTierRoles(guild, member, standing.tierIndex);
 
-  if (member) await applyTierRoles(guild, member, appliedTierIndex);
-
-  const changed = previousTierIndex !== appliedTierIndex;
+  const changed = previousTierIndex !== standing.tierIndex;
   if (changed) {
     repo.audit(
       guild.id,
       'tier_change',
       userId,
-      `${previousTierIndex === null ? 'none' : tierAt(previousTierIndex).key} -> ${appliedTierKey      }${
-        override !== null ? ' (king override)' : ''
+      `${previousTierIndex === null ? 'none' : tierAt(previousTierIndex).key} -> ${tierKey}${
+        credits.length > 0 ? ' (adjusted)' : ''
       }`,
     );
 
@@ -116,17 +120,17 @@ export async function recalculateStanding(
       kind: 'tier_change',
       subjectId: userId,
       fromTierKey: previousTierIndex === null ? null : tierAt(previousTierIndex).key,
-      toTierKey: appliedTierKey,
+      toTierKey: tierKey,
     });
 
     // Tier changes are never announced publicly. The only person told is the
     // player themselves, by DM.
     if (options.notifyUser !== false && member) {
-      await notifyTierChange(member, appliedTierIndex, previousTierIndex, standing.tierIndex > 0);
+      await notifyTierChange(member, standing.tierIndex, previousTierIndex, standing.tierIndex > 0);
     }
   }
 
-  return { standing, previousTierIndex, changed, overridden: override !== null };
+  return { standing, previousTierIndex, changed, adjusted: credits.length > 0 };
 }
 
 /**

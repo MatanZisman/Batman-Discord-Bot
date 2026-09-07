@@ -52,29 +52,40 @@ export function buildPlayerPicker(context: { ratedSoFar: number; remainingToday:
 export function buildRatingScale(targetId: string, existingValue: number | null): BaseMessageOptions {
   const select = new StringSelectMenuBuilder()
     .setCustomId(encodeId(NS.RATE, 'value', targetId))
-    .setPlaceholder(existingValue ? `Current rating: ${existingValue}` : 'Pick a rating')
+    // Deliberately no .setDefault() on the matching option, even when we know
+    // the current rating. A select menu with a default renders that value in
+    // place of the placeholder, which makes the control look like a filled-in
+    // field rather than a dropdown to open — so the panel reads as a dead end
+    // saying "you already rated this person" with nothing to do about it. The
+    // current value goes in the placeholder instead, where it still tells you
+    // where you stand but the menu plainly invites a choice.
+    .setPlaceholder(existingValue ? `Currently ${existingValue} — choose a new value` : 'Choose a rating')
     .addOptions(
       COPY.ratingScale.map((step) =>
         new StringSelectMenuOptionBuilder()
           .setValue(String(step.value))
           .setLabel(`${step.value} · ${step.label}`)
-          .setDescription(step.description)
-          .setDefault(existingValue === step.value),
+          .setDescription(step.description),
       ),
     );
 
   const header = existingValue
-    ? `You already rated <@${targetId}> **${existingValue}**. Choosing a new value replaces it.`
+    ? `You currently rate <@${targetId}> **${existingValue}**. Pick a value below to change it, or leave it as it is.`
     : `Rating <@${targetId}>.`;
 
   return {
     content: [`**${COPY.ratingPromptTitle}**`, header].join('\n'),
     components: [
       new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select),
+      // Two ways out, so choosing not to change a rating is never a dead end.
       new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder()
           .setCustomId(encodeId(NS.RATE, 'back'))
           .setLabel('Pick someone else')
+          .setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder()
+          .setCustomId(encodeId(NS.RATE, 'done'))
+          .setLabel('Finish')
           .setStyle(ButtonStyle.Secondary),
       ),
     ],

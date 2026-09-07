@@ -91,8 +91,8 @@ export function buildRatingHubMessage(): BaseMessageOptions {
       {
         name: '⑤ If you think a rating is unfair',
         value: [
-          `Press **Ask for a re-review**, at most once every ${LIMITS.CHALLENGE_COOLDOWN_DAYS} days. Everyone currently holding a rating on you gets a private message asking whether they would like to take another look — they are never told what you said or what they originally gave you.`,
-          `Anyone who does not answer within ${LIMITS.CHALLENGE_RESPONSE_WINDOW_HOURS} hours has their rating dropped, on the basis that an unanswered rating is stale. The ${SERVER_LAYOUT.kingRoleName} role then has ${LIMITS.KING_REVIEW_WINDOW_HOURS} hours to look over the outcome.`,
+          `Press **Ask for a re-review**, at most once every ${LIMITS.CHALLENGE_COOLDOWN_DAYS} days. It sends a short request to the ${SERVER_LAYOUT.kingRoleName} role asking them to look at your value.`,
+          `**Nobody who rated you is contacted**, and nobody is told you asked. The ${SERVER_LAYOUT.kingRoleName} role may adjust your value or leave it alone, and you will not get a reply either way — if it is accepted, you will simply see your area change within a day.`,
         ].join('\n'),
       },
       {

@@ -5,9 +5,11 @@ import {
   type ChatInputCommandInteraction,
   type TextChannel,
 } from 'discord.js';
-import { DAY_MS, LIMITS, TIERS } from './config.js';
+import { CREDITS, TIERS } from './config.js';
+import { applyAdjustment, areaName, clearAdjustments } from './core/adjustments.js';
 import * as repo from './db/repo.js';
 import { publishRatingHub, setupGuild } from './core/guild-setup.js';
+import { publishKingMenu } from './core/king-panel.js';
 import { maintenanceNotice, pauseGuild, resumeGuild } from './core/maintenance.js';
 import { applyTierRoles, recalculateGuild, recalculateStanding } from './core/standing-service.js';
 import { handleOpenChallenge } from './handlers/challenge.js';
@@ -84,25 +86,28 @@ export const COMMANDS = [
     )
     .addSubcommand((sub) =>
       sub
-        .setName('set-standing')
-        .setDescription("Place a member in an area directly, overriding what the community score says")
-        .addUserOption((o) => o.setName('user').setDescription('Who to place').setRequired(true))
+        .setName('adjust')
+        .setDescription("Lean on a member's score without taking it over")
+        .addUserOption((o) => o.setName('user').setDescription('Who to adjust').setRequired(true))
         .addStringOption((o) =>
           o
-            .setName('area')
-            .setDescription('Where to put them, or Automatic to hand them back to the score')
+            .setName('direction')
+            .setDescription('Which way to lean, or undo what is already there')
             .setRequired(true)
             .addChoices(
-              ...TIERS.map((tier) => ({ name: tier.roleName, value: tier.key })),
-              { name: 'Automatic (release override)', value: 'auto' },
+              { name: 'ease off — argue the community has been harsh', value: 'ease' },
+              { name: 'push down — argue the community has been generous', value: 'push' },
+              { name: 'undo — take back every adjustment on them', value: 'clear' },
             ),
         )
         .addIntegerOption((o) =>
           o
-            .setName('days')
-            .setDescription(`How long the placement holds. Defaults to ${LIMITS.KING_OVERRIDE_DAYS} days.`)
+            .setName('reports')
+            .setDescription(
+              `How many reports' worth. Defaults to ${CREDITS.OFFERED_SIZES[1] ?? 5}. Ignored when undoing.`,
+            )
             .setMinValue(1)
-            .setMaxValue(365),
+            .setMaxValue(CREDITS.MAX_REPORTS_PER_GRANT),
         ),
     )
     .addSubcommand((sub) =>
@@ -189,6 +194,12 @@ export async function dispatchCommand(interaction: ChatInputCommandInteraction):
       if (interaction.commandName === 'standing-setup') await runSetup(interaction);
       else if (interaction.commandName === 'standing-revert') await showRevertConfirmation(interaction);
       else await runAdmin(interaction);
+
+      // The commands and the pinned panel are two views of the same state, so
+      // anything done by command is reflected on the panel straight away.
+      if (interaction.guild && interaction.commandName === 'standing-admin') {
+        await publishKingMenu(interaction.guild).catch(() => undefined);
+      }
       return;
     }
     default:
@@ -288,7 +299,7 @@ async function runAdmin(interaction: ChatInputCommandInteraction): Promise<void>
     return;
   }
 
-  if (sub === 'set-standing') await runSetStanding(interaction);
+  if (sub === 'adjust') await runAdjust(interaction);
   else if (sub === 'remove') await runRemove(interaction);
   else if (sub === 'reinstate') await runReinstate(interaction);
   else if (sub === 'pause') await runPause(interaction);
@@ -367,63 +378,81 @@ async function runNotice(interaction: ChatInputCommandInteraction): Promise<void
 }
 
 /**
- * Places a member directly, bypassing the score.
+ * Leans on a member's score without taking it over.
  *
- * Implemented as a time-limited override rather than a written-in standing, so
- * it lapses on its own and hands the member back to the community rather than
- * pinning them somewhere forever because nobody remembered to undo it. It also
- * reuses the release path the sweeper already runs for challenge overrides.
+ * The command is the same mechanism as the panel button, deliberately — there
+ * is exactly one way a moderator influences a standing, and it is measured in
+ * reports. What the command adds is a free choice of size, for the cases the
+ * three offered presets do not fit.
  */
-async function runSetStanding(interaction: ChatInputCommandInteraction): Promise<void> {
+async function runAdjust(interaction: ChatInputCommandInteraction): Promise<void> {
   const guild = interaction.guild;
   if (!guild) return;
 
   const user = interaction.options.getUser('user', true);
-  const area = interaction.options.getString('area', true);
-  const days = interaction.options.getInteger('days') ?? LIMITS.KING_OVERRIDE_DAYS;
+  const direction = interaction.options.getString('direction', true);
+  const reports = interaction.options.getInteger('reports') ?? CREDITS.OFFERED_SIZES[1] ?? 5;
 
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
   const record = repo.ensureMember(guild.id, user.id);
   if (record.participating === 0) {
     await interaction.editReply(
-      `${user} is outside the standing system, so there is no standing to set. Reinstate them, or ask them to join, first.`,
+      `${user} is outside the standing system, so there is no score to lean on. Reinstate them, or ask them to join, first.`,
     );
     return;
   }
 
-  if (area === 'auto') {
-    repo.setTierOverride(guild.id, user.id, null, null);
-    await recalculateStanding(guild, user.id, { notifyUser: false });
+  if (direction === 'clear') {
+    const undone = await clearAdjustments(guild, user.id, interaction.user.id);
+
+    if (undone === 0) {
+      await interaction.editReply(`${user} is not carrying any adjustments.`);
+      return;
+    }
+
     logAction(guild, {
       kind: 'admin',
       actorId: interaction.user.id,
-      summary: `released the manual placement on <@${user.id}>`,
+      summary: `took back ${undone} adjustment(s) on <@${user.id}>`,
     });
-    await interaction.editReply(`${user} is back on the community score.`);
+
+    await interaction.editReply(
+      `Took back ${undone} adjustment(s). ${user} is on the community score alone.`,
+    );
     return;
   }
 
-  const tier = TIERS.find((t) => t.key === area);
-  if (!tier) {
-    await interaction.editReply('That is not one of the areas.');
+  if (direction !== 'ease' && direction !== 'push') {
+    await interaction.editReply('That is not one of the directions.');
     return;
   }
 
-  repo.setTierOverride(guild.id, user.id, tier.key, Date.now() + days * DAY_MS);
-  await recalculateStanding(guild, user.id, { notifyUser: true });
+  const outcome = await applyAdjustment(
+    guild,
+    user.id,
+    direction,
+    reports,
+    interaction.user.id,
+  );
 
   logAction(guild, {
     kind: 'admin',
     actorId: interaction.user.id,
-    summary: `placed <@${user.id}> in ${tier.roleName} for ${days} day(s)`,
+    summary: `${direction === 'ease' ? 'eased' : 'pushed'} <@${user.id}> by ${reports} report(s)' worth`,
   });
+
+  const { preview } = outcome;
+  const undo =
+    preview.reportsToUndo !== null
+      ? `\n\nIt would take **${preview.reportsToUndo}** fresh report(s) at the top of the scale to put them back where they were — the community can overrule this, it does not have to wait it out.`
+      : '';
 
   await interaction.editReply(
     [
-      `${user} is now in **${tier.roleName}** for ${days} day(s), regardless of their score.`,
+      `${user} is now in **${areaName(outcome.appliedTierIndex)}** at **${preview.projectedScore.toFixed(2)}**, from ${preview.currentScore.toFixed(2)}.${undo}`,
       '',
-      'They have been told their area changed, in a private message, with no reason given and no mention of who decided it. After that it lapses on its own and the community score takes over again.',
+      `The adjustment is ${reports} report(s)' worth of signal, not a placement: every real rating still counts, and this fades out over ${CREDITS.LIFETIME_DAYS} days. ${outcome.moved ? 'They have been told their area changed, privately, with no reason given and no mention of who decided it.' : 'Their area did not move, so they were told nothing.'}`,
     ].join('\n'),
   );
 }
@@ -441,7 +470,7 @@ async function runRemove(interaction: ChatInputCommandInteraction): Promise<void
   // undone does not silently wipe the ratings involved.
   const affected = repo.suspendVotesInvolving(guild.id, user.id);
   repo.setParticipation(guild.id, user.id, false);
-  repo.setTierOverride(guild.id, user.id, null, null);
+  repo.revokeCreditsFor(guild.id, user.id, interaction.user.id);
   repo.setAdminRemoval(guild.id, user.id, true);
   repo.audit(guild.id, 'admin_remove', user.id);
 

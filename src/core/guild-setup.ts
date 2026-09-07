@@ -13,6 +13,7 @@ import { SERVER_LAYOUT, TIERS, type ChannelSpec } from '../config.js';
 import * as repo from '../db/repo.js';
 import { logger } from '../lib/logger.js';
 import { buildRatingHubMessage } from '../ui/rating-hub.js';
+import { publishKingMenu } from './king-panel.js';
 import { recalculateGuild } from './standing-service.js';
 
 /**
@@ -310,13 +311,32 @@ async function ensureKingChannel(
   guild: Guild,
   category: CategoryChannel,
   report: SetupReport,
+  name: string,
+  legacyName?: string,
 ): Promise<TextChannel> {
-  const name = SERVER_LAYOUT.kingChannelName;
+  const children = [...category.children.cache.values()];
 
-  const existing = [...category.children.cache.values()].find(
+  let existing = children.find(
     (child): child is TextChannel =>
       child.type === ChannelType.GuildText && child.name === name.toLowerCase(),
   );
+
+  // The log channel used to be called something else. Rename it in place
+  // rather than creating a sibling and leaving the old one behind, so the
+  // challenge reports and action log already written there are preserved.
+  if (!existing && legacyName) {
+    const legacy = children.find(
+      (child): child is TextChannel =>
+        child.type === ChannelType.GuildText && child.name === legacyName.toLowerCase(),
+    );
+
+    if (legacy) {
+      existing = await legacy
+        .setName(name, 'Community standing: admin area split into a log and a menu')
+        .catch(() => legacy);
+      report.repaired.push(`renamed #${legacyName} to #${name}`);
+    }
+  }
 
   if (existing) {
     repo.recordProvisionedItem({
@@ -407,7 +427,19 @@ export async function setupGuild(guild: Guild): Promise<SetupReport> {
     ],
     report,
   );
-  const kingChannel = await ensureKingChannel(guild, kingCategory, report);
+  const kingChannel = await ensureKingChannel(
+    guild,
+    kingCategory,
+    report,
+    SERVER_LAYOUT.kingChannelName,
+    SERVER_LAYOUT.legacyKingChannelName,
+  );
+  const kingMenuChannel = await ensureKingChannel(
+    guild,
+    kingCategory,
+    report,
+    SERVER_LAYOUT.kingMenuChannelName,
+  );
 
   /* 5. Persist + publish the hub ---------------------------------------- */
   repo.saveGuildSettings({
@@ -415,9 +447,13 @@ export async function setupGuild(guild: Guild): Promise<SetupReport> {
     rating_channel_id: ratingChannel.id,
     king_role_id: kingRole.id,
     king_channel_id: kingChannel.id,
+    king_menu_channel_id: kingMenuChannel.id,
   });
 
   await publishRatingHub(ratingChannel);
+  await publishKingMenu(guild).catch((error: unknown) =>
+    logger.warn('Could not publish the KING control panel', error),
+  );
 
   // Everyone already in the server needs their starting role, or the cascade
   // would leave existing members locked out of the tier areas entirely.

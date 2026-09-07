@@ -14,7 +14,11 @@ CREATE TABLE IF NOT EXISTS guilds (
   guild_id           TEXT PRIMARY KEY,
   rating_channel_id  TEXT,
   king_role_id       TEXT,
+  -- Where challenge reports and the action log are written.
   king_channel_id    TEXT,
+  -- Where the live stats-and-buttons message lives. A separate channel so
+  -- rewriting it in place never disturbs the log.
+  king_menu_channel_id TEXT,
   -- Legacy. The bot no longer creates a "white" category: channels that were
   -- already in the server are simply left alone. Kept so existing databases
   -- still open, never read or written.
@@ -46,8 +50,8 @@ CREATE TABLE IF NOT EXISTS tier_roles (
   PRIMARY KEY (guild_id, tier_key)
 );
 
--- Cached standing per member. Derived data: safe to delete and recompute,
--- except for the override columns, which record a KING decision.
+-- Cached standing per member. Derived data: safe to delete and recompute.
+-- A moderator's decisions live in score_credits, not here.
 CREATE TABLE IF NOT EXISTS members (
   guild_id      TEXT NOT NULL,
   user_id       TEXT NOT NULL,
@@ -57,8 +61,13 @@ CREATE TABLE IF NOT EXISTS members (
   rater_count   INTEGER NOT NULL DEFAULT 0,
   first_seen_at INTEGER NOT NULL,
   updated_at    INTEGER NOT NULL,
-  -- Set when the KING role overrides a computed placement. While the override
-  -- is live the scoring engine still runs, but its result is not applied.
+  -- Legacy, all three. Two earlier designs let a KING pin a member's area or
+  -- their value outright, suspending the score while it held. That is gone:
+  -- moderators now grant adjustments in score_credits, which the engine reads
+  -- as ordinary signal. Kept so existing databases still open; never read, and
+  -- blanked once by the migration at the bottom of this file so nobody is left
+  -- parked under an override with nothing left to release it.
+  override_score    REAL,
   override_tier_key TEXT,
   override_until    INTEGER,
   -- Last time this member moved to a worse tier, for the demotion cooldown.
@@ -132,6 +141,33 @@ CREATE TABLE IF NOT EXISTS challenge_voters (
   PRIMARY KEY (challenge_id, rater_id)
 );
 
+-- Moderator adjustments: the only way a KING influences a standing.
+--
+-- A row is a bundle of synthetic votes: "reports" is how many, "value" is what
+-- each one says (1 to ease off, 5 to push down). The scoring engine folds them
+-- into the same weighted mean the real votes go into, so the community keeps
+-- talking and can still overrule what a moderator did.
+--
+-- Rows are never deleted. Revoking sets revoked_at, which keeps a moderator's
+-- decision to undo their own grant as visible as the grant itself.
+CREATE TABLE IF NOT EXISTS score_credits (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id   TEXT NOT NULL,
+  target_id  TEXT NOT NULL,
+  value      REAL NOT NULL,
+  reports    REAL NOT NULL,
+  granted_by TEXT NOT NULL,
+  -- Free text from the granting KING, shown only in the admin channels.
+  reason     TEXT,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  revoked_at INTEGER,
+  revoked_by TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_credits_live
+  ON score_credits (guild_id, target_id, revoked_at, expires_at);
+
 -- Provenance for everything /standing-setup touched, so /standing-revert can
 -- put the server back exactly as it found it.
 --   created_by_bot = 1  the bot made this, so revert deletes it
@@ -177,4 +213,11 @@ export const MIGRATIONS: string[] = [
   'ALTER TABLE members ADD COLUMN notice_sent_at INTEGER',
   'ALTER TABLE members ADD COLUMN notice_attempted_at INTEGER',
   'ALTER TABLE guilds ADD COLUMN notice_active_at INTEGER',
+  'ALTER TABLE guilds ADD COLUMN king_menu_channel_id TEXT',
+  'ALTER TABLE members ADD COLUMN override_score REAL',
+  // Retire the override mechanism. Nothing reads these columns any more, and
+  // nothing writes them, so leaving a live override in place would strand the
+  // member on a value with no code path left to lapse it. Idempotent by the
+  // same token: after the first run there is nothing left to blank.
+  'UPDATE members SET override_score = NULL, override_tier_key = NULL, override_until = NULL',
 ];

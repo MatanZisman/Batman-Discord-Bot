@@ -53,11 +53,23 @@ In the Discord Developer Portal the application needs the **Server Members Inten
 
 These commands carry no Discord-level permission gate, because Discord can only gate on built-in permissions and `KING` is a plain role — gating on Manage Server would hide the commands from the people meant to run them. The check happens at runtime instead, so a member who tries gets a private "that is not for you" and nothing else.
 
+### The admin area is two channels
+
+`#kings-log` is append-only history: challenge reports and the member action log. `#kings-menu` holds one pinned control panel — a snapshot at the top, buttons underneath — and nothing else.
+
+They're split because they want opposite things. The log must never be disturbed; the panel is a single message rewritten in place on every action, so its numbers always reflect what you just did. Together in one channel, every refresh either buries the log or gets buried by it.
+
+If your server already has `#king-review`, setup **renames** it to `#kings-log` rather than creating a sibling, so the challenge reports and action log already written there survive the split.
+
+**What the panel shows**, chosen to answer the questions you actually have on opening it: whether the system is on, where everyone sits, whether it's being used, whether anything is waiting on you, and how many scores currently carry a moderator's thumb. What it deliberately does *not* show is any route from a number to a person — no "most rated", no worst-offender list, no names anywhere. Counts only, so the panel can be read over your shoulder without breaking the promise the members were given. There's a test asserting no user id can leak into the snapshot.
+
+The buttons cover everything except `/standing-revert`, which stays a typed command on purpose — it is not something to put one click away from a panel you press regularly. Every button re-checks permissions on press rather than trusting its location, so a panel left behind in a channel whose permissions were later opened up is not a way in. Slash commands still work in either admin channel, and using one refreshes the panel too.
+
 ### The admin toolkit
 
 | `/standing-admin …` | What it does |
 | --- | --- |
-| `set-standing user area [days]` | Places someone directly, ignoring their score |
+| `adjust user ease\|push\|clear [reports]` | Leans on someone's score — see below |
 | `remove user` | Takes someone out of the system, and they cannot rejoin themselves |
 | `reinstate user` | Lifts a removal |
 | `pause` / `resume` | Maintenance mode — see below |
@@ -66,9 +78,17 @@ These commands carry no Discord-level permission gate, because Discord can only 
 | `refresh-hub` | Repost the pinned explanation and buttons |
 | `notice on/off/status` | The one-time launch DM — see below |
 
-**`set-standing` is a time-limited override, not a written-in standing.** It defaults to 30 days and then lapses on its own, handing the member back to the community score. Permanent-by-default placements rot: somebody gets parked in Orange during an argument and is still there a year later because nobody remembered to undo it. Choosing `Automatic` releases it early. The member is told their area changed, privately, with no reason and no mention of who decided it — the same message any automatic move sends, so a manual placement is not a public correction.
+**`adjust` cannot set anyone's area, and that is the whole design.** There is no command anywhere that places a member. See [Leaning on a score](#leaning-on-a-score) for what it does instead, and why.
 
 **`remove` is not the same as the member opting out.** Both leave them outside the system, but a removal sets a flag that stops them pressing Join to undo it. It suspends their ratings rather than deleting them, exactly like opting out, so `reinstate` genuinely restores the previous state. Reinstating deliberately leaves them opted *out*: the block is lifted and they choose whether to walk back in, because participation is theirs to decide.
+
+### Why the public channel doesn't fill up
+
+Mostly it never gets the chance. Members can't post there — `SendMessages` is denied to `@everyone` — and every reply the bot gives a member is ephemeral. Ephemeral messages are never written to channel history, so however many thousands of ratings and button presses the channel sees, none of it leaves a trace to clean up.
+
+What does accumulate is litter from three sources: Discord's own "so-and-so pinned a message" notices, which can't be switched off; a duplicate guide, if the pin is ever removed and the guide gets republished; and anything posted by an Administrator, whose permissions bypass the channel's `SendMessages` denial entirely. The sweeper clears those on each pass.
+
+**The rule is: pinned stays, everything else goes**, after a 10-minute grace period so nobody watches their own message vanish mid-sentence. That rule can't accidentally eat the guide, and it gives anyone who wants a lasting notice in there an obvious way to protect it — pin it. Tunable in the `CLEANUP` block in `src/config.ts`.
 
 ### Telling people it exists
 
@@ -144,7 +164,7 @@ Everything below is ephemeral or a DM. There is no public output anywhere in the
 
 Leaving **suspends** those ratings rather than deleting them, and rejoining restores any that have not aged out. This is deliberate. If opting out deleted them, then leaving and immediately rejoining would be the cheapest reset in the system — instant, unlimited, needing nobody's agreement — and strictly better than the re-review flow built for exactly that purpose, which is capped at once a week and involves the KING role. Suspension keeps the exit genuine (you really are out, and nothing about you counts for anything) without making it a laundering route. Ratings still expire 30 days after they were given, in or out of the system, so time clears your record on the same terms as everybody else's. Suspension never revives a rating that a challenge dropped or that had already expired.
 
-**Asking for a re-review** — `/challenge`, at most once every 7 days. See below.
+**Asking for a review** — `/challenge`, at most once every 7 days. It sends a request to the KING role and contacts nobody else. See below.
 
 ## The scoring model
 
@@ -216,15 +236,63 @@ For specific complaints:
 - **Brigading happened anyway** → lower `MAX_NEW_VOTES_PER_DAY` and raise `minEffectiveWeight`.
 - **Turn a mechanic off** → `RECENCY_DECAY_ENABLED: false`, `TIER_EXIT_MARGIN: 0`, `MIN_HOURS_BETWEEN_DEMOTIONS: 0`, `MAX_TIER_JUMP_PER_UPDATE: TIERS.length`, or set every `voteWeight` to 1.
 
-## Re-review ("challenge")
+## Asking for a review
 
-A rated player can ask their raters to look again, once every 7 days. Green players cannot — there is nothing to review.
+A rated player can ask the KING role to look at their value, once every 7 days. Green players cannot — there is nothing to review.
 
-**Phase 1 — collecting (48h).** Everyone holding a current rating gets a private DM: *"Matan would like to be rated again, would you like to do so?"* with two buttons — rate them again, or keep the current rating. The KING channel gets a notice that a review is running; no action needed.
+It is one step. The request is posted to `#kings-log` and pings the role, already priced: each option says where it would land the player and what it would take to overturn. A KING eases them off, pushes them down, takes back an earlier adjustment, or dismisses it; anything nobody acts on closes itself after 48 hours. **Nothing is asked of anyone else** — no rater is contacted, and nobody is told a request exists.
 
-**Phase 2 — KING review (24h).** Anyone who never answered has their rating removed, on the principle that an unanswered rating is stale rather than a vote. Closed DMs count as no answer. The standing is recomputed and posted to the KING channel with three buttons: accept the outcome, undo the whole review (restoring every rating exactly as it was, original timestamps included), or place the player manually.
+**The player is promised nothing.** They are told the request was sent and that any change will show up within a day. No reply, no outcome message, no reasons. If their value does change they get the ordinary neutral note that any move produces, with nothing in it referencing a request — so a successful review is indistinguishable from the community easing off on its own. An ignored request lapsing is a legitimate outcome, and promising a verdict would put an obligation on volunteers that nobody agreed to.
 
-**Phase 3 — closed.** KING silence accepts the community's outcome. A manual placement holds for 30 days and then hands the member back to the score. The player is told the result and the response counts, privately, and nothing else.
+### Why past raters are no longer contacted
+
+The original design DMed every rater asking them to look again, and dropped the rating of anyone who did not reply. Three things were wrong with it, and they are worth recording because the idea is an appealing one.
+
+It turned one person's request into unsolicited DMs for a dozen others — a bot mass-messaging people about somebody else's grievance is how bots get blocked and members get annoyed. It made silence load-bearing: a rater on holiday had their honest rating deleted, which meant the most reliable way to win a review was to have been rated by inattentive people. And it leaked timing: a DM arriving told you that someone you had rated was unhappy, and in a small server that is most of the way to knowing who.
+
+### Leaning on a score
+
+A KING cannot set anybody's area, and cannot set anybody's value. The only thing they can do is grant an **adjustment**, measured in reports.
+
+One report's worth is one synthetic vote — value 1 to ease off, value 5 to push down — carrying the weight of one full-strength rater. It goes into the same weighted mean everything else goes into, and then the engine decides the area exactly as it does for everyone. A moderator supplies evidence; they don't get to skip to the verdict.
+
+Notice what that makes a pardon. `PRIOR_VALUE` is 1, so relief is literally extra prior: a few more of the invisible "this player is fine" votes that everyone already starts with. The mechanism isn't bolted on beside the scoring, it *is* the scoring, handed a dial.
+
+#### What it costs to overturn one
+
+Six people rate a player 5. That's \((6 \times 5 + 4)/(6 + 4) = 3.40\) — Orange. A KING eases them by five reports' worth:
+
+\[ \frac{30 + 5 + 4}{6 + 5 + 4} = 2.60 \quad \rightarrow \text{Yellow} \]
+
+To get back to Orange's 3.2, the community needs *n* more reports at 5:
+
+\[ \frac{39 + 5n}{15 + n} \geq 3.2 \;\Longrightarrow\; 1.8n \geq 9 \;\Longrightarrow\; n \geq 5 \]
+
+Five more people. The relief is real but it is not the last word, which is the property the whole thing exists for.
+
+In general, reaching a threshold *T* costs \((T-1)/(5-T)\) extra maximum-severity reports per report's worth of relief:
+
+| Boundary | Threshold | Reports per credit |
+| --- | --- | --- |
+| Yellow | 2.0 | 0.33 |
+| Orange | 3.2 | 1.22 |
+| Red | 3.6 | 1.86 |
+
+Relief barely slows a slide into Yellow and strongly resists Red. That shape wasn't designed, it falls out of the mean — and it's the right one: a moderator saying "this is overblown" should be hard to overrule at the severe end and easy to overrule at the mild one.
+
+**Nobody has to do that arithmetic.** Every option in the picker is priced against the member's actual votes at the moment you open it — where they'd land, and how many real reports it would take to undo. It's a simulation against the live engine rather than a formula, so it accounts for the prior, the gates, the consensus requirement and whatever slack the member already has, and it can't drift out of step when you retune anything.
+
+#### Two rules that keep it honest
+
+**Adjustments move the score and nothing else.** Every gate — headcount, summed trust, consensus — is computed from real votes alone, and `raterCount` never counts a synthetic vote as a person. Let them leak into the gates and relief starts *helping* somebody into Red by padding their rater count, which is precisely backwards. One lever, one effect. Pressure has the same limit from the other side: you can push a score as high as you like and Red still wants eight real people, so no amount of moderator pressure manufactures a Red on its own.
+
+**They fade, and you can take them back.** A grant lasts 30 days and decays over that window exactly as votes do, so a month-old pardon loses to this morning's report without needing a special rule for it. `adjust … clear`, or the panel's Undo button, withdraws every live grant immediately. Grants are revoked rather than deleted — a moderator undoing their own call is part of the record, and a table that only ever showed grants would overstate how much intervention actually stuck.
+
+#### Why not just set the value?
+
+That's what the previous two designs did, and it was the wrong shape. An override answers "where does this person belong?" and locks the answer in; while it's live the community is talking to itself, with people still rating and none of it doing anything. For a system whose entire claim is that the community decides, that's a bad thing to be true even temporarily.
+
+An adjustment answers a smaller, more honest question: "how much of this do I think is wrong?" And it self-normalises in a way a flat score offset cannot. Five reports of relief is most of the picture against six raters and nearly nothing against sixty, so a moderator's judgement carries real weight over a thin signal and is quietly outvoted by a thick one. That rule is nowhere in the code — it's just what a mean does.
 
 ## How shaming is designed out
 
@@ -260,12 +328,16 @@ src/
   interactions.ts           one router for all buttons and select menus
   core/
     scoring.ts              pure scoring engine — no DB, no Discord, no clock
-    scoring.test.ts         17 tests pinning the behaviour above
+    scoring.test.ts         37 tests pinning the behaviour above
     standing-service.ts     scoring ↔ Discord: recalculate, assign roles, DM
     guild-setup.ts          roles, categories, the visibility cascade
     guild-teardown.ts       the inverse, driven by recorded provenance
-    challenge-service.ts    the three-phase re-review workflow
+    challenge-service.ts    review requests: one step, KING decides
+    adjustments.ts          the one way a moderator influences a score
     action-log.ts           batched member-activity feed for the KING channel
+    channel-tidy.ts         keeps the public channel down to the pinned guide
+    king-panel.ts           publishes the pinned admin control panel
+    king-stats.ts           the admin snapshot: counts only, never names
     join-notice.ts          the one-time launch DM, fired on first voice join
     maintenance.ts          pause/resume: hide the surface, keep all the data
   handlers/                 interaction handlers (rating, challenge, participation)
@@ -273,7 +345,7 @@ src/
   ui/                       message builders, kept separate from logic
   db/                       SQLite schema, connection, typed queries
   jobs/sweeper.ts           the only clock: vote expiry, challenge deadlines,
-                            override release, deferred demotions
+                            lapsed adjustments, deferred demotions
   lib/                      logger, custom-id encoding, private-reply helper
 ```
 

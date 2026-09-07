@@ -4,6 +4,7 @@ import {
   type ChatInputCommandInteraction,
   type GuildMemberRoleManager,
   type StringSelectMenuInteraction,
+  type UserSelectMenuInteraction,
 } from 'discord.js';
 import { SERVER_LAYOUT } from '../config.js';
 import * as repo from '../db/repo.js';
@@ -11,7 +12,8 @@ import * as repo from '../db/repo.js';
 type AnyGuildInteraction =
   | ChatInputCommandInteraction
   | ButtonInteraction
-  | StringSelectMenuInteraction;
+  | StringSelectMenuInteraction
+  | UserSelectMenuInteraction;
 
 export type GuardResult = { ok: true } | { ok: false; message: string };
 
@@ -42,10 +44,12 @@ function hasManageGuild(interaction: AnyGuildInteraction): boolean {
  *         but nobody holds it yet, so without this the owner could never run
  *         anything. It is also the recovery path if the KING role is deleted.
  *
- *   WHERE Once the KING channel exists, these commands only work inside it,
- *         so administration never happens in front of the members. The first
- *         /standing-setup is necessarily exempt, because it is the thing that
- *         creates that channel.
+ *   WHERE Once the admin channels exist, these commands only work inside
+ *         them, so administration never happens in front of the members. Both
+ *         the log and the menu channel count: the menu is where the buttons
+ *         live, and the log is where someone reading history will reach for a
+ *         command. The first /standing-setup is necessarily exempt, because it
+ *         is the thing that creates those channels.
  */
 export function checkAdminAccess(interaction: AnyGuildInteraction): GuardResult {
   if (!interaction.guildId) {
@@ -60,12 +64,15 @@ export function checkAdminAccess(interaction: AnyGuildInteraction): GuardResult 
   }
 
   const settings = repo.getGuildSettings(interaction.guildId);
-  const kingChannelId = settings?.king_channel_id;
+  const allowed = [settings?.king_menu_channel_id, settings?.king_channel_id].filter(
+    (id): id is string => Boolean(id),
+  );
 
-  if (kingChannelId && interaction.channelId !== kingChannelId) {
+  if (allowed.length > 0 && !allowed.includes(interaction.channelId ?? '')) {
+    const preferred = settings?.king_menu_channel_id ?? settings?.king_channel_id;
     return {
       ok: false,
-      message: `Administration happens in <#${kingChannelId}>, out of sight of the members. Run this there instead.`,
+      message: `Administration happens in <#${preferred}>, out of sight of the members. Run this there instead — most of it is buttons on the pinned panel, so you rarely need the commands at all.`,
     };
   }
 

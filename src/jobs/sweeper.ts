@@ -2,8 +2,9 @@ import type { Client } from 'discord.js';
 import { DAY_MS, LIMITS, SCORING } from '../config.js';
 import { getDatabase } from '../db/index.js';
 import * as repo from '../db/repo.js';
+import { tidyRatingChannel } from '../core/channel-tidy.js';
 import { recalculateStanding, resweepGuild } from '../core/standing-service.js';
-import { advanceChallenge } from '../handlers/challenge.js';
+import { expireStaleRequests } from '../core/challenge-service.js';
 import { logger } from '../lib/logger.js';
 
 /**
@@ -13,12 +14,13 @@ import { logger } from '../lib/logger.js';
  *   1. Votes older than VOTE_LIFETIME_DAYS stop counting, and the members they
  *      were about get recomputed (which is how people climb back up over time
  *      without doing anything at all).
- *   2. Challenges past their response or KING deadline advance a phase.
- *   3. KING overrides whose window has lapsed are cleared, handing the member
- *      back to the community score.
+ *   2. Review requests nobody acted on close themselves.
+ *   3. Members whose moderator adjustment has just run out are re-evaluated,
+ *      so their roles follow a score that changed on a clock.
  *   4. Every member who could plausibly move is re-evaluated, which lands
  *      demotions that the cooldown deferred and picks up changes in what a
  *      rater's vote is worth.
+ *   5. Litter is cleared out of the public rating channel.
  */
 export function startSweeper(client: Client): NodeJS.Timeout {
   const intervalMs = LIMITS.SWEEP_INTERVAL_MINUTES * 60 * 1000;
@@ -53,16 +55,28 @@ export async function sweep(client: Client): Promise<void> {
     );
   }
 
-  /* 2. Advance challenges ---------------------------------------------- */
-  for (const challenge of repo.listChallengesNeedingAttention(now)) {
-    await advanceChallenge(client, challenge);
-  }
+  /* 2. Close review requests nobody acted on --------------------------- */
+  const lapsed = await expireStaleRequests(client).catch((error) => {
+    logger.error('Expiring stale review requests failed', error);
+    return 0;
+  });
+  if (lapsed > 0) logger.info(`Closed ${lapsed} unanswered review request(s)`);
 
-  /* 3. Release lapsed KING overrides ----------------------------------- */
-  for (const { guild_id, user_id } of lapsedOverrides(now)) {
-    repo.setTierOverride(guild_id, user_id, null, null);
-    const guild = await client.guilds.fetch(guild_id).catch(() => null);
-    if (guild) await recalculateStanding(guild, user_id).catch(() => undefined);
+  /* 3. Pick up adjustments that have just run out ----------------------- */
+  //
+  // Nothing needs undoing here — an expired adjustment simply stops being read
+  // by the scoring engine. What does need doing is noticing, so the member's
+  // roles catch up with a score that quietly changed on a timestamp rather
+  // than on anybody's action.
+  const since = now - LIMITS.SWEEP_INTERVAL_MINUTES * 60 * 1000;
+  for (const guild of client.guilds.cache.values()) {
+    if (repo.isGuildPaused(guild.id)) continue;
+
+    for (const userId of repo.listMembersWithLapsedCredits(guild.id, since)) {
+      await recalculateStanding(guild, userId).catch((error) =>
+        logger.error(`Recalculation after an adjustment lapsed failed for ${userId}`, error),
+      );
+    }
   }
 
   /* 4. Re-evaluate anyone who could have moved ------------------------- */
@@ -77,13 +91,11 @@ export async function sweep(client: Client): Promise<void> {
       return 0;
     });
     logger.debug(`Re-evaluated ${count} standing(s) in ${guild.id}`);
+
+    /* 5. Clear litter out of the public channel ------------------------ */
+    await tidyRatingChannel(guild).catch((error) =>
+      logger.error(`Tidying the rating channel failed for ${guild.id}`, error),
+    );
   }
 }
 
-function lapsedOverrides(now: number): Array<{ guild_id: string; user_id: string }> {
-  return getDatabase()
-    .prepare<[number], { guild_id: string; user_id: string }>(
-      'SELECT guild_id, user_id FROM members WHERE override_tier_key IS NOT NULL AND override_until IS NOT NULL AND override_until < ?',
-    )
-    .all(now);
-}

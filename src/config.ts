@@ -301,25 +301,105 @@ export const LIMITS = {
   VOTE_UPDATE_COOLDOWN_MINUTES: 5,
   /** Anti-brigade: max brand new ratings one member can cast per rolling day. */
   MAX_NEW_VOTES_PER_DAY: 20,
-  /** How often a player may open a re-review challenge. */
+  /** How often a player may ask for a review. */
   CHALLENGE_COOLDOWN_DAYS: 7,
-  /** How long voters have to answer a challenge DM before their vote is dropped. */
-  CHALLENGE_RESPONSE_WINDOW_HOURS: 48,
-  /** Extra window after that in which the KING role can override the outcome. */
-  KING_REVIEW_WINDOW_HOURS: 24,
   /**
-   * How long a KING placement override holds before the community score takes
-   * over again. Defaults to one vote lifetime, so by the time it lapses every
-   * rating behind the disputed placement has expired anyway.
+   * How long a request sits in the KING channel before it closes itself as
+   * "no action taken".
+   *
+   * Requests are not obligations. Nobody is required to answer one, and an
+   * ignored request quietly lapsing is a legitimate outcome — that is why the
+   * player is never promised a reply. This exists so the queue on the panel
+   * stays a real number rather than an ever-growing pile.
    */
-  KING_OVERRIDE_DAYS: 30,
+  CHALLENGE_REQUEST_WINDOW_HOURS: 48,
   /** Minutes an ephemeral rating session stays interactive. */
   RATING_SESSION_TIMEOUT_MINUTES: 10,
   /**
    * How often the background sweeper runs. It expires aged-out votes, advances
-   * challenges past their deadlines, and lets lapsed KING overrides go.
+   * challenges past their deadlines, and re-evaluates anyone whose adjustment
+   * has run out.
    */
   SWEEP_INTERVAL_MINUTES: 15,
+} as const;
+
+/**
+ * ============================================================================
+ *  ADJUSTMENTS — how a moderator leans on a score without owning it
+ * ============================================================================
+ *  A KING reviewing a request does not set anybody's area. They grant an
+ *  adjustment, measured in *reports*, and the scoring engine takes it from
+ *  there.
+ *
+ *  One report's worth is one synthetic vote: value 1 to ease off, value 5 to
+ *  push down, carrying the weight of one full-strength rater. It goes into the
+ *  same weighted mean everything else goes into.
+ *
+ *  ---------------------------------------------------------------------------
+ *  WHY THIS RATHER THAN SETTING THE VALUE OUTRIGHT
+ *  ---------------------------------------------------------------------------
+ *  An override answers the question "where does this person belong?" and locks
+ *  the answer in. While it is live the community is talking to itself: people
+ *  keep rating, the score keeps moving, and none of it does anything. That is
+ *  a bad shape for a system whose entire claim is that the community decides.
+ *
+ *  An adjustment answers a smaller and more honest question: "how much of this
+ *  do I think is wrong?" Five reports' worth of forgiveness says exactly that,
+ *  and it stays answerable — five more people reporting the same thing
+ *  overrules it, because the arithmetic never stopped running.
+ *
+ *  It also self-normalises, which a flat offset cannot. Five reports of relief
+ *  is a lot against six raters and very little against sixty, so a moderator's
+ *  judgement carries real weight over a thin signal and is quietly outvoted by
+ *  a thick one. Nobody has to write that rule down; it falls out of the mean.
+ *
+ *  ---------------------------------------------------------------------------
+ *  WHAT IT COSTS TO UNDO ONE
+ *  ---------------------------------------------------------------------------
+ *  Reaching a threshold T needs (T-1)/(5-T) extra maximum-severity reports per
+ *  report's worth of relief granted. With the shipped thresholds:
+ *
+ *      Yellow (2.0)    0.33 reports per credit
+ *      Orange (3.2)    1.22
+ *      Red    (3.6)    1.86
+ *
+ *  So relief barely slows a slide into Yellow and strongly resists Red, which
+ *  is the right shape: a moderator saying "this is overblown" should be hard
+ *  to overrule on the severe end and easy to overrule on the mild one.
+ *
+ *  Nobody has to do that arithmetic in their head. The picker computes the
+ *  exact consequence of each size against the member's real votes and prints
+ *  it, so the choice is made with the answer already on screen.
+ * ============================================================================
+ */
+export const CREDITS = {
+  /**
+   * How long a grant lasts. One vote lifetime, so by the time it runs out
+   * every rating it was granted against has expired anyway and the member is
+   * back on a score built entirely from things that happened after the review.
+   */
+  LIFETIME_DAYS: 30,
+
+  /**
+   * Fade a grant out over its lifetime, exactly as votes fade, instead of
+   * having it vanish on a cliff edge.
+   *
+   * This also settles a fairness question. A grant made a month ago competing
+   * with a report made this morning should lose, and decay is what makes that
+   * happen without a special rule: the old thing is quiet and the new thing is
+   * loud, whoever made it.
+   */
+  DECAY_ENABLED: true,
+
+  /** Sizes offered in the picker, in reports' worth. */
+  OFFERED_SIZES: [3, 5, 8] as const,
+
+  /**
+   * Ceiling on a single grant. Fifteen full-weight reports is far more signal
+   * than a small server produces in a month, so anything above this is not a
+   * judgement about a score, it is an override wearing a disguise.
+   */
+  MAX_REPORTS_PER_GRANT: 15,
 } as const;
 
 export const SERVER_LAYOUT = {
@@ -338,10 +418,47 @@ export const SERVER_LAYOUT = {
   ratingChannelName: 'standing-ratings',
   /** Privileged role that arbitrates challenges and runs admin commands. */
   kingRoleName: 'KING',
-  /** Private channel for challenge reports and the member action log. */
-  kingChannelName: 'king-review',
+  /**
+   * The admin area is two channels, not one, because they want opposite
+   * things. The log is append-only history that must never be disturbed; the
+   * menu is a single live message that is constantly rewritten in place. Put
+   * them together and every stats refresh either buries the log or gets buried
+   * by it.
+   */
+  kingChannelName: 'kings-log',
+  kingMenuChannelName: 'kings-menu',
+  /**
+   * What the log channel used to be called. Setup renames it rather than
+   * leaving an orphan behind, so existing challenge history and the action
+   * log survive the split.
+   */
+  legacyKingChannelName: 'king-review',
   /** Category holding the KING channel. */
   adminCategoryName: 'Standing Administration',
+} as const;
+
+/**
+ * Housekeeping for the public rating channel.
+ *
+ * The channel is read-only and every reply the bot gives a member is ephemeral,
+ * so in normal use almost nothing accumulates there — ephemeral messages never
+ * enter channel history at all. What does build up is litter: Discord's own
+ * "so-and-so pinned a message" notices, and a stray duplicate guide if the pin
+ * is ever removed and the guide gets republished.
+ *
+ * THE RULE: pinned stays, everything else goes. That keeps the channel down to
+ * the guide, and gives anyone who genuinely wants a notice to live there an
+ * obvious way to protect it — pin it.
+ */
+export const CLEANUP = {
+  RATING_CHANNEL_ENABLED: true,
+  /** How many recent messages to examine per pass. Discord's fetch cap is 100. */
+  MESSAGES_PER_PASS: 100,
+  /**
+   * Grace period before an unpinned message is swept. Long enough that nobody
+   * watches their own message vanish mid-sentence, short enough to stay tidy.
+   */
+  MIN_AGE_MINUTES: 10,
 } as const;
 
 /**

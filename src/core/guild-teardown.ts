@@ -150,6 +150,9 @@ function configuredNames(): { roles: Set<string>; categories: Set<string>; chann
     channels: new Set([
       SERVER_LAYOUT.ratingChannelName.toLowerCase(),
       SERVER_LAYOUT.kingChannelName.toLowerCase(),
+      SERVER_LAYOUT.kingMenuChannelName.toLowerCase(),
+      // Servers set up before the admin area was split still have this one.
+      SERVER_LAYOUT.legacyKingChannelName.toLowerCase(),
       ...TIERS.flatMap((t) =>
         t.channels.map((c) => (c.kind === 'text' ? c.name.toLowerCase() : c.name)),
       ),

@@ -1,4 +1,5 @@
 import {
+  CREDITS,
   DAY_MS,
   DEFAULT_TIER_INDEX,
   SCORING,
@@ -61,6 +62,25 @@ import {
  *  produces a cliff you can jump off with a single extra vote.
  *
  *  ---------------------------------------------------------------------------
+ *  ADJUSTMENTS: WHERE A MODERATOR FITS IN
+ *  ---------------------------------------------------------------------------
+ *  A KING reviewing a request grants an adjustment measured in reports. One
+ *  report's worth is one synthetic vote at value 1 (relief) or value 5
+ *  (pressure), and it joins the sum above like any other vote.
+ *
+ *  Notice what that makes a pardon: PRIOR_VALUE is 1, so relief is literally
+ *  extra prior — a few more of the invisible "this player is fine" votes
+ *  everyone already starts with. The mechanism is not bolted on beside the
+ *  scoring; it is the scoring, handed a dial.
+ *
+ *  THE ONE RULE THAT MATTERS: adjustments move the score and nothing else.
+ *  Every gate below — headcount, summed trust, consensus — is computed from
+ *  real votes alone, and `raterCount` never counts a synthetic vote as a
+ *  person. Let them leak into the gates and relief starts *helping* somebody
+ *  into Red by padding their rater count, which is the exact opposite of the
+ *  intent. One lever, one effect.
+ *
+ *  ---------------------------------------------------------------------------
  *  HOW A SCORE BECOMES A TIER  (the asymmetric part)
  *  ---------------------------------------------------------------------------
  *  Being wrongly placed in Red is far more damaging than being wrongly left in
@@ -117,6 +137,26 @@ export interface WeightedVote {
   factors: { trust: number; recency: number; tenure: number };
 }
 
+/**
+ * A moderator's adjustment, expressed in the only unit anyone has intuition
+ * for: how many reports it is worth.
+ */
+export interface CreditInput {
+  /** What each unit says. SCORING.MIN_RATING for relief, MAX_RATING for pressure. */
+  value: number;
+  /** Reports' worth. One unit weighs the same as one full-strength rater. */
+  reports: number;
+  /** When it was granted, for the fade. */
+  grantedAt: number;
+  /** When it stops counting entirely. */
+  expiresAt: number;
+}
+
+export interface WeightedCredit {
+  value: number;
+  weight: number;
+}
+
 export interface GateResult {
   tierKey: string;
   tierIndex: number;
@@ -145,6 +185,12 @@ export interface Standing {
   deferredTierIndex: number | null;
   /** Per-tier gate outcomes, handy for debugging and for the KING report. */
   gates: GateResult[];
+  /**
+   * Signed weight contributed by live moderator adjustments: negative for
+   * relief, positive for pressure, zero when there are none. Reported so the
+   * admin views can say how much of a score is not the community's doing.
+   */
+  creditWeight: number;
   /** The votes that counted, with their computed weights. */
   countedVotes: WeightedVote[];
   /** Votes that were ignored, and why. */
@@ -163,12 +209,15 @@ export function trustFactor(rater: RaterContext): number {
 }
 
 /** Recency component: 1.0 when fresh, decaying to RECENCY_FLOOR_WEIGHT at expiry. */
-export function recencyFactor(ageDays: number): number {
+export function recencyFactor(
+  ageDays: number,
+  lifetimeDays: number = SCORING.VOTE_LIFETIME_DAYS,
+): number {
   if (!SCORING.RECENCY_DECAY_ENABLED) return 1;
-  const life = SCORING.VOTE_LIFETIME_DAYS;
+  if (lifetimeDays <= 0) return 0;
   if (ageDays <= 0) return 1;
-  if (ageDays >= life) return 0; // expired; caller filters these out anyway
-  const progress = ageDays / life;
+  if (ageDays >= lifetimeDays) return 0; // expired; caller filters these out anyway
+  const progress = ageDays / lifetimeDays;
   return 1 - progress * (1 - SCORING.RECENCY_FLOOR_WEIGHT);
 }
 
@@ -238,12 +287,44 @@ export function weighVotes(
 }
 
 /**
+ * Turns adjustments into weighted entries, dropping anything spent.
+ *
+ * A grant fades over its own lifetime rather than the vote lifetime, so
+ * changing CREDITS.LIFETIME_DAYS does what it says without dragging the vote
+ * decay curve along with it.
+ */
+export function weighCredits(credits: CreditInput[], now: number): WeightedCredit[] {
+  const weighted: WeightedCredit[] = [];
+
+  for (const credit of credits) {
+    if (now >= credit.expiresAt) continue;
+
+    const lifetimeDays = (credit.expiresAt - credit.grantedAt) / DAY_MS;
+    const ageDays = (now - credit.grantedAt) / DAY_MS;
+    const fade = CREDITS.DECAY_ENABLED ? recencyFactor(ageDays, lifetimeDays) : 1;
+    const weight = credit.reports * fade;
+
+    if (weight <= 0) continue;
+
+    weighted.push({ value: clamp(credit.value, SCORING.MIN_RATING, SCORING.MAX_RATING), weight });
+  }
+
+  return weighted;
+}
+
+/**
  * The prior-shrunk weighted mean. With no votes at all this returns exactly
  * PRIOR_VALUE, i.e. everyone starts perfectly Green.
+ *
+ * Adjustments enter here and only here. They are arithmetically
+ * indistinguishable from votes at this point, which is the whole design: a
+ * moderator gets to add signal, not to replace the calculation.
  */
-export function shrunkScore(counted: WeightedVote[]): number {
-  const weightedSum = counted.reduce((sum, v) => sum + v.weight * v.value, 0);
-  const totalWeight = counted.reduce((sum, v) => sum + v.weight, 0);
+export function shrunkScore(counted: WeightedVote[], credits: WeightedCredit[] = []): number {
+  const entries = [...counted, ...credits];
+
+  const weightedSum = entries.reduce((sum, v) => sum + v.weight * v.value, 0);
+  const totalWeight = entries.reduce((sum, v) => sum + v.weight, 0);
 
   const numerator = weightedSum + SCORING.PRIOR_STRENGTH * SCORING.PRIOR_VALUE;
   const denominator = totalWeight + SCORING.PRIOR_STRENGTH;
@@ -306,6 +387,8 @@ export interface StandingContext {
   communityAgeMs?: number;
   /** When this player last moved to a worse tier, for the demotion cooldown. */
   lastDemotionAt?: number | null;
+  /** Live moderator adjustments. They move the score and never the gates. */
+  credits?: CreditInput[];
 }
 
 /**
@@ -325,7 +408,11 @@ export function computeStanding(
   context: StandingContext = {},
 ): Standing {
   const { counted, ignored } = weighVotes(votes, now, context.communityAgeMs);
+  const credits = weighCredits(context.credits ?? [], now);
 
+  // Note what is and is not in scope here. Every statistic below comes from
+  // `counted` alone, so the gates keep measuring real people no matter what a
+  // moderator has granted. Only the score, two lines down, sees the credits.
   const effectiveWeight = counted.reduce((sum, v) => sum + v.weight, 0);
   const strongWeight = counted
     .filter((v) => v.value >= SCORING.STRONG_VOTE_THRESHOLD)
@@ -335,7 +422,7 @@ export function computeStanding(
   // satisfied by a pile of low-trust accounts all shouting "5".
   const strongVoteShare = effectiveWeight > 0 ? strongWeight / effectiveWeight : 0;
 
-  const score = shrunkScore(counted);
+  const score = shrunkScore(counted, credits);
   const stats = { raterCount: counted.length, effectiveWeight, strongVoteShare };
   const { tierIndex: uncappedTierIndex, gates } = resolveTier(score, stats, currentTierIndex);
 
@@ -353,6 +440,10 @@ export function computeStanding(
     uncappedTierIndex,
     deferredTierIndex: tierIndex === uncappedTierIndex ? null : uncappedTierIndex,
     gates,
+    creditWeight: credits.reduce(
+      (sum, c) => sum + (c.value >= SCORING.PRIOR_VALUE + 1 ? c.weight : -c.weight),
+      0,
+    ),
     countedVotes: counted,
     ignoredVotes: ignored,
   };
@@ -374,6 +465,56 @@ function limitDemotion(
   if (lastDemotionAt !== null && now - lastDemotionAt < cooldownMs) return current;
 
   return Math.min(earned, current + SCORING.MAX_TIER_JUMP_PER_UPDATE);
+}
+
+/**
+ * How many fresh maximum-severity reports it would take to push somebody into
+ * `targetTierIndex`, given the votes and adjustments they already carry.
+ *
+ * This is the number that makes an adjustment an honest choice rather than a
+ * guess. A moderator granting relief is implicitly deciding how much evidence
+ * it should take to overturn them, so the picker computes it and prints it
+ * instead of leaving them to reason about a Bayesian mean in their head.
+ *
+ * It is a simulation, not a formula, and that is deliberate: it runs the real
+ * engine, so it accounts for the prior, the gates, the consensus requirement
+ * and the slack the member already has. A closed form would drift out of step
+ * with the tuning values the first time anyone touched them.
+ *
+ * Returns null when the tier is out of reach within `maxProbe` reports, which
+ * usually means a gate other than the score is the binding constraint.
+ */
+export function reportsToReach(
+  targetTierIndex: number,
+  votes: VoteInput[],
+  now: number,
+  currentTierIndex: number | null,
+  context: StandingContext = {},
+  maxProbe = 40,
+): number | null {
+  const probeContext = { ...context, lastDemotionAt: null };
+
+  for (let n = 0; n <= maxProbe; n++) {
+    const probes: VoteInput[] = Array.from({ length: n }, (_, i) => ({
+      raterId: `__probe_${i}`,
+      value: SCORING.MAX_RATING,
+      castAt: now,
+      tierIndex: DEFAULT_TIER_INDEX,
+      participating: true,
+      tenureMs: Number.MAX_SAFE_INTEGER,
+    }));
+
+    const { uncappedTierIndex } = computeStanding(
+      [...votes, ...probes],
+      now,
+      currentTierIndex,
+      probeContext,
+    );
+
+    if (uncappedTierIndex >= targetTierIndex) return n;
+  }
+
+  return null;
 }
 
 /**

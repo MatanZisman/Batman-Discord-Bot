@@ -4,12 +4,8 @@ import { logger } from './lib/logger.js';
 import { dispatchCommand } from './commands.js';
 import { maintenanceNotice } from './core/maintenance.js';
 import {
-  handleChallengeKeep,
-  handleChallengeLook,
-  handleChallengeReRate,
-  handleKingDecision,
-  handleKingPlace,
-  handleKingPlacePrompt,
+  handleKingAdjust,
+  handleKingClose,
   handleOpenChallenge,
 } from './handlers/challenge.js';
 import {
@@ -26,6 +22,7 @@ import {
   showOwnStanding,
   startRatingSession,
 } from './handlers/rating.js';
+import { routeKingMenu } from './handlers/king-menu.js';
 import { handleRevertCancel, handleRevertConfirm } from './handlers/revert.js';
 
 /**
@@ -70,6 +67,9 @@ export async function routeInteraction(interaction: Interaction): Promise<void> 
         case NS.REVERT:
           await routeRevert(interaction, id.action);
           return;
+        case NS.MENU:
+          await routeKingMenu(interaction, id.action);
+          return;
       }
     }
   } catch (error) {
@@ -96,24 +96,19 @@ async function routeChallenge(
   interaction: Extract<Interaction, { customId: string }>,
   action: string,
 ): Promise<void> {
-  if (action === 'rerate' && interaction.isStringSelectMenu()) return handleChallengeReRate(interaction);
   if (!interaction.isButton()) return;
-
   if (action === 'open') return handleOpenChallenge(interaction);
-  if (action === 'look') return handleChallengeLook(interaction);
-  if (action === 'keep') return handleChallengeKeep(interaction);
 }
 
 async function routeKing(
   interaction: Extract<Interaction, { customId: string }>,
   action: string,
 ): Promise<void> {
-  if (action === 'settier' && interaction.isStringSelectMenu()) return handleKingPlace(interaction);
+  if (action === 'adjust' && interaction.isStringSelectMenu()) return handleKingAdjust(interaction);
   if (!interaction.isButton()) return;
 
-  if (action === 'accept') return handleKingDecision(interaction, 'accept');
-  if (action === 'revert') return handleKingDecision(interaction, 'revert');
-  if (action === 'set') return handleKingPlacePrompt(interaction);
+  if (action === 'dismiss') return handleKingClose(interaction, 'dismiss');
+  if (action === 'clear') return handleKingClose(interaction, 'clear');
 }
 
 async function routeParticipation(

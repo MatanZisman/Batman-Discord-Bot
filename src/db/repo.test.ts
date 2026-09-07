@@ -2,7 +2,9 @@ import { rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { closeDatabase, openDatabase } from './index.js';
+import { TIERS } from '../config.js';
+import { collectAdminStats } from '../core/king-stats.js';
+import { closeDatabase, getDatabase, openDatabase } from './index.js';
 import * as repo from './repo.js';
 
 /**
@@ -134,6 +136,131 @@ describe('admin controls', () => {
 
   it('reports an unknown guild as not paused', () => {
     expect(repo.isGuildPaused('never-heard-of-it')).toBe(false);
+  });
+});
+
+describe('moderator adjustments', () => {
+  const G = 'guild-credits';
+  const HOUR = 3_600_000;
+
+  it('counts only what is live: not revoked, not expired', () => {
+    repo.grantCredit({
+      guildId: G,
+      targetId: 'player',
+      value: 1,
+      reports: 5,
+      grantedBy: 'king',
+      expiresAt: Date.now() + HOUR,
+    });
+    const expired = repo.grantCredit({
+      guildId: G,
+      targetId: 'player',
+      value: 1,
+      reports: 3,
+      grantedBy: 'king',
+      expiresAt: Date.now() - HOUR,
+    });
+
+    const live = repo.listLiveCredits(G, 'player');
+    expect(live).toHaveLength(1);
+    expect(live[0]?.reports).toBe(5);
+
+    // The expired one is still on the table, just not counted.
+    expect(repo.listCreditHistory(G, 'player')).toHaveLength(2);
+    expect(expired).toBeGreaterThan(0);
+  });
+
+  it('revokes rather than deletes, so undoing stays part of the record', () => {
+    repo.grantCredit({
+      guildId: G,
+      targetId: 'undone',
+      value: 5,
+      reports: 4,
+      grantedBy: 'king',
+      expiresAt: Date.now() + HOUR,
+    });
+
+    expect(repo.revokeCreditsFor(G, 'undone', 'other-king')).toBe(1);
+    expect(repo.listLiveCredits(G, 'undone')).toHaveLength(0);
+
+    const history = repo.listCreditHistory(G, 'undone');
+    expect(history).toHaveLength(1);
+    expect(history[0]?.revoked_by).toBe('other-king');
+
+    // Revoking twice is a no-op rather than an error.
+    expect(repo.revokeCreditsFor(G, 'undone', 'other-king')).toBe(0);
+  });
+
+  it('reports who has just lapsed, so the sweeper knows whose roles are stale', () => {
+    repo.grantCredit({
+      guildId: G,
+      targetId: 'lapsing',
+      value: 1,
+      reports: 5,
+      grantedBy: 'king',
+      expiresAt: Date.now() - 60_000,
+    });
+
+    expect(repo.listMembersWithLapsedCredits(G, Date.now() - HOUR)).toContain('lapsing');
+    // Already handled on an earlier pass: outside the window, so not repeated.
+    expect(repo.listMembersWithLapsedCredits(G, Date.now() - 1_000)).not.toContain('lapsing');
+  });
+});
+
+describe('the admin snapshot', () => {
+  const G = 'guild-stats';
+
+  it('counts membership, activity and placements without naming anyone', () => {
+    repo.saveGuildSettings({
+      guild_id: G,
+      rating_channel_id: 'c1',
+      king_role_id: 'r1',
+      king_channel_id: 'log',
+      king_menu_channel_id: 'menu',
+    });
+
+    repo.ensureMember(G, 'plays');
+    repo.ensureMember(G, 'quiet');
+    repo.ensureMember(G, 'left');
+    repo.ensureMember(G, 'kicked');
+    repo.setParticipation(G, 'left', false);
+    repo.setParticipation(G, 'kicked', false);
+    repo.setAdminRemoval(G, 'kicked', true);
+    repo.upsertVote(G, 'plays', 'quiet', 4);
+    repo.grantCredit({
+      guildId: G,
+      targetId: 'quiet',
+      value: 1,
+      reports: 5,
+      grantedBy: 'king',
+      expiresAt: Date.now() + 86_400_000,
+    });
+
+    const stats = collectAdminStats(G);
+
+    expect(stats.participating).toBe(2);
+    // Opted out and removed are counted apart: they are different situations.
+    expect(stats.optedOut).toBe(1);
+    expect(stats.removed).toBe(1);
+    expect(stats.activeRatings).toBe(1);
+    expect(stats.activeRaters).toBe(1);
+    expect(stats.ratingsLastDay).toBe(1);
+    expect(stats.adjustedMembers).toBe(1);
+    expect(stats.paused).toBe(false);
+
+    // Every tier is present even at zero, so the panel never changes shape.
+    expect(stats.tiers).toHaveLength(TIERS.length);
+    expect(stats.tiers.reduce((sum, t) => sum + t.count, 0)).toBe(stats.participating);
+
+    // The promise the whole design rests on: no route from a number to a name.
+    expect(JSON.stringify(stats)).not.toContain('plays');
+    expect(JSON.stringify(stats)).not.toContain('quiet');
+  });
+
+  it('reports a guild it has never seen as empty rather than throwing', () => {
+    const stats = collectAdminStats('no-such-guild');
+    expect(stats.participating).toBe(0);
+    expect(stats.noticeActiveAt).toBeNull();
   });
 });
 
@@ -293,15 +420,23 @@ describe('members', () => {
     expect(repo.getMember(GUILD, 'leaver')?.participating).toBe(1);
   });
 
-  it('stores and clears a KING placement override', () => {
-    repo.ensureMember(GUILD, 'disputed');
-    repo.setTierOverride(GUILD, 'disputed', 'yellow', 5_000);
+  it('sweeps a member carrying only an adjustment, with no ratings at all', () => {
+    // The obvious resweep query is "anyone with ratings or out of the default
+    // tier". Somebody pushed down by hand, from Green, with nobody having
+    // rated them, is neither on the first pass — and would then sit there
+    // until their adjustment happened to coincide with a vote.
+    repo.ensureMember(GUILD, 'only-adjusted');
+    repo.grantCredit({
+      guildId: GUILD,
+      targetId: 'only-adjusted',
+      value: 5,
+      reports: 6,
+      grantedBy: 'king',
+      expiresAt: Date.now() + 3_600_000,
+    });
 
-    expect(repo.getMember(GUILD, 'disputed')?.override_tier_key).toBe('yellow');
-    expect(repo.getMember(GUILD, 'disputed')?.override_until).toBe(5_000);
-
-    repo.setTierOverride(GUILD, 'disputed', null, null);
-    expect(repo.getMember(GUILD, 'disputed')?.override_tier_key).toBeNull();
+    const swept = repo.listMembersToResweep(GUILD, TIERS[0]!.key).map((m) => m.user_id);
+    expect(swept).toContain('only-adjusted');
   });
 });
 
