@@ -133,7 +133,7 @@ function buildNoticeBody(guildId: string, flavour: Flavour): string {
           `This server has a community rating system for how people are to play with. Teammates rate each other privately, and that decides which set of channels you see. You start in **${firstTier}**, along with everyone else.`,
         ]
       : [
-          `**Something new in the server**`,
+          `**From CS2 Israel by WqLoNN - There is something new in the server:**`,
           '',
           `There is now a community rating system for how people are to play with. Teammates rate each other privately, and that decides which set of channels you see. You start in **${firstTier}**, along with everyone else.`,
         ];
