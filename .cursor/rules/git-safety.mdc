@@ -1,0 +1,40 @@
+---
+description: Git in this repo is read-only for the agent; Matan runs anything that writes
+alwaysApply: true
+---
+
+# Git is read-only for the agent
+
+Matan controls this repository's history. Never run a git command that changes
+anything — a `beforeShellExecution` hook enforces this, but do not rely on being
+caught. Assume the restriction and work with it.
+
+**You may run** anything that only reads: `status`, `log`, `diff`, `show`,
+`branch` (listing only), `remote -v`, `ls-files`, `grep`, `check-ignore`,
+`rev-parse`, `stash list`, `config --get`, and `fetch`. Adding `--dry-run` to
+an otherwise blocked command is allowed too, and is a good way to show what
+something *would* do.
+
+**You may not run** `commit`, `push`, `pull`, `merge`, `rebase`, `reset`,
+`checkout`, `switch`, `restore`, `cherry-pick`, `revert`, `stash push/pop`,
+`clean`, `tag`, `branch -d`, `remote add`, `config <key> <value>`, `init`,
+`submodule`, `worktree`, `gc`, `apply`, `am`, or anything else that writes.
+
+## When you need one of those
+
+State the exact command and why you want it, then stop and let Matan run it.
+
+```
+Ready to commit. Please run:
+
+    git add -A && git commit -m "Add the standing action log"
+
+Then tell me and I'll continue.
+```
+
+Do not rephrase a blocked command to slip past the guard, do not reach for
+another tool to do the same thing, and do not edit `.git/` directly. If the
+guard seems wrong, say so — do not route around it.
+
+Staging matters as much as committing: before proposing a commit, check
+`git status --short` and confirm nothing ignored or secret is included.

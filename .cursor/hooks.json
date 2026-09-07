@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeShellExecution": [
+      {
+        "command": "node .cursor/hooks/guard-git.js",
+        "matcher": "[Gg][Ii][Tt]",
+        "timeout": 10,
+        "failClosed": true
+      }
+    ]
+  }
+}

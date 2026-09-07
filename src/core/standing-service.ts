@@ -261,7 +261,7 @@ async function notifyTierChange(
     headline,
     before ? `Previously: ${before.roleName}` : null,
     '',
-    'This is private. Nobody is notified, no list of who rated you exists anywhere you or anyone else can read, and ratings expire on their own over time.',
+    'This is private, and ratings expire on their own over time.',
     // Says "the moderators", not "your raters": a review request goes to the
     // KING role and contacts nobody else. The earlier design did DM every past
     // rater, and this line outlived it — promising a member something the bot
