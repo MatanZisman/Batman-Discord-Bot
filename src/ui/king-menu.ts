@@ -10,6 +10,7 @@ import {
 import { CREDITS, SERVER_LAYOUT, tierAt } from '../config.js';
 import type { AdjustmentPreview } from '../core/adjustments.js';
 import type { AdminStats } from '../core/king-stats.js';
+import { stringsIn } from '../i18n/index.js';
 import { NS, encodeId } from '../lib/custom-ids.js';
 import { buildAdjustmentOptions } from './challenge.js';
 
@@ -21,127 +22,134 @@ import { buildAdjustmentOptions } from './challenge.js';
  * channel never accumulates anything and two KINGs looking at it at the same
  * time do not fight over each other's screens.
  */
-export function buildKingMenuMessage(stats: AdminStats, logChannelId: string | null): BaseMessageOptions {
+export function buildKingMenuMessage(
+  guildId: string,
+  stats: AdminStats,
+  logChannelId: string | null,
+): BaseMessageOptions {
+  const t = stringsIn(guildId);
+
   return {
-    content: renderStats(stats, logChannelId),
+    content: renderStats(guildId, stats, logChannelId),
     components: [
       // Row 1: the things you press most, and the one that needs attention.
       new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder()
           .setCustomId(encodeId(NS.MENU, 'refresh'))
-          .setLabel('Refresh')
+          .setLabel(t.admin.refreshBtn)
           .setStyle(ButtonStyle.Secondary),
         new ButtonBuilder()
           .setCustomId(encodeId(NS.MENU, 'recalc'))
-          .setLabel('Recalculate all')
+          .setLabel(t.admin.recalcBtn)
           .setStyle(ButtonStyle.Secondary),
         new ButtonBuilder()
           .setCustomId(encodeId(NS.MENU, 'adjust'))
-          .setLabel("Adjust a member's score")
+          .setLabel(t.admin.adjustBtn)
           .setStyle(ButtonStyle.Primary),
         new ButtonBuilder()
           .setCustomId(encodeId(NS.MENU, 'undo'))
-          .setLabel('Undo an adjustment')
+          .setLabel(t.admin.undoBtn)
           .setStyle(ButtonStyle.Secondary),
       ),
       // Row 2: membership, which is the destructive corner.
       new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder()
           .setCustomId(encodeId(NS.MENU, 'remove'))
-          .setLabel('Remove a member')
+          .setLabel(t.admin.removeBtn)
           .setStyle(ButtonStyle.Danger),
         new ButtonBuilder()
           .setCustomId(encodeId(NS.MENU, 'reinstate'))
-          .setLabel('Reinstate a member')
+          .setLabel(t.admin.reinstateBtn)
           .setStyle(ButtonStyle.Secondary),
       ),
       // Row 3: whole-system switches.
       new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder()
           .setCustomId(encodeId(NS.MENU, stats.paused ? 'resume' : 'pause'))
-          .setLabel(stats.paused ? 'Resume the system' : 'Pause for maintenance')
+          .setLabel(stats.paused ? t.admin.resumeBtn : t.admin.pauseBtn)
           .setStyle(stats.paused ? ButtonStyle.Success : ButtonStyle.Secondary),
         new ButtonBuilder()
           .setCustomId(encodeId(NS.MENU, stats.noticeActiveAt ? 'notice-off' : 'notice-on'))
-          .setLabel(stats.noticeActiveAt ? 'Stop announcing' : 'Announce to members')
+          .setLabel(stats.noticeActiveAt ? t.admin.announceOffBtn : t.admin.announceOnBtn)
           .setStyle(ButtonStyle.Secondary),
         new ButtonBuilder()
           .setCustomId(encodeId(NS.MENU, 'refresh-hub'))
-          .setLabel('Repost the public guide')
+          .setLabel(t.admin.refreshHubBtn)
+          .setStyle(ButtonStyle.Secondary),
+      ),
+      // Row 4: language selector.
+      new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId(encodeId(NS.MENU, 'language'))
+          .setLabel(t.admin.languageBtn)
           .setStyle(ButtonStyle.Secondary),
       ),
     ],
   };
 }
 
-function renderStats(stats: AdminStats, logChannelId: string | null): string {
-  const status = stats.paused
-    ? '**PAUSED** — channels hidden, member commands refused, all data intact.'
-    : 'Running normally.';
+function renderStats(guildId: string, stats: AdminStats, logChannelId: string | null): string {
+  const t = stringsIn(guildId);
+
+  const status = stats.paused ? t.admin.paused : t.admin.running;
 
   const announce = stats.noticeActiveAt
-    ? `On since <t:${Math.floor(stats.noticeActiveAt / 1000)}:R>. ${stats.noticePending} still to be told.`
-    : `Off. ${stats.noticePending} member(s) have never been told the system exists.`;
+    ? t.admin.announceOn({ ts: Math.floor(stats.noticeActiveAt / 1000), pending: stats.noticePending })
+    : t.admin.announceOff({ pending: stats.noticePending });
 
-  const spread = stats.tiers.map((t) => `${t.roleName} **${t.count}**`).join(' · ');
+  const spread = stats.tiers.map((tier) => t.admin.tierCount({ name: tier.roleName, count: tier.count })).join(' · ');
 
   const attention = [
     stats.challengesAwaitingKing > 0
-      ? `**${stats.challengesAwaitingKing} review(s) waiting on a decision from you.**`
+      ? t.admin.reviewsPending({ count: stats.challengesAwaitingKing })
       : null,
     stats.openChallenges > stats.challengesAwaitingKing
-      ? `${stats.openChallenges - stats.challengesAwaitingKing} review(s) still gathering answers.`
+      ? t.admin.reviewsOpen({ count: stats.openChallenges - stats.challengesAwaitingKing })
       : null,
     stats.adjustedMembers > 0
-      ? `${stats.adjustedMembers} member(s) carrying a moderator adjustment.`
+      ? t.admin.adjustedMembers({ count: stats.adjustedMembers })
       : null,
   ].filter(Boolean);
 
   return [
-    `# ${SERVER_LAYOUT.kingRoleName} control panel`,
+    t.admin.panelTitle({ king: SERVER_LAYOUT.kingRoleName }),
     status,
     '',
-    '**Where everyone sits**',
+    t.admin.whereTitle,
     spread,
-    `${stats.participating} taking part · ${stats.optedOut} opted out · ${stats.removed} removed`,
+    t.admin.membersSummary({ in: stats.participating, out: stats.optedOut, removed: stats.removed }),
     '',
-    '**Activity**',
-    `${stats.ratingsLastDay} rating(s) in the last day, ${stats.ratingsLastWeek} in the last week.`,
-    `${stats.activeRatings} rating(s) currently counting, from ${stats.activeRaters} rater(s).`,
+    t.admin.activityTitle,
+    t.admin.activityRatings({ day: stats.ratingsLastDay, week: stats.ratingsLastWeek }),
+    t.admin.activityCurrent({ ratings: stats.activeRatings, raters: stats.activeRaters }),
     '',
-    '**Announcement**',
+    t.admin.announceTitle,
     announce,
-    ...(attention.length > 0 ? ['', '**Needs a look**', ...attention] : []),
+    ...(attention.length > 0 ? ['', t.admin.needsLookTitle, ...attention] : []),
     '',
-    [
-      '-# Counts only — nothing here names anyone, by design.',
-      'Accurate as of the last Refresh.',
-      logChannelId ? `Action history is in <#${logChannelId}>.` : null,
-    ]
-      .filter(Boolean)
-      .join(' '),
+    t.admin.panelFooter({ logChannel: logChannelId }),
   ].join('\n');
 }
 
 /** Step 1 of the member-targeted actions: who? */
 export function buildMemberPicker(
   action: 'adjust' | 'remove' | 'reinstate' | 'undo',
+  guildId?: string,
 ): BaseMessageOptions {
+  const t = guildId ? stringsIn(guildId) : stringsIn('');
+
   const prompt = {
-    adjust: 'Whose score do you want to lean on?',
-    undo: 'Whose adjustments do you want to take back?',
-    remove: 'Who do you want to remove from the system?',
-    reinstate: 'Who do you want to let back in?',
+    adjust: t.admin.pickerAdjust,
+    undo: t.admin.pickerUndo,
+    remove: t.admin.pickerRemove,
+    reinstate: t.admin.pickerReinstate,
   }[action];
 
   const warning = {
-    adjust:
-      'You are adding signal, not setting an area. The community score keeps running, so enough people can still overrule you — the next screen tells you exactly how many.',
-    undo: 'Everything currently granted to them is withdrawn and their score goes back to being the community\'s alone.',
-    remove:
-      'They leave the system and cannot rejoin themselves. Their ratings are suspended, not deleted, so reinstating them puts things back.',
-    reinstate:
-      'This only lifts the block. They stay outside the system until they choose to rejoin, and their suspended ratings resume then.',
+    adjust: t.admin.pickerWarnAdjust,
+    undo: t.admin.pickerWarnUndo,
+    remove: t.admin.pickerWarnRemove,
+    reinstate: t.admin.pickerWarnReinstate,
   }[action];
 
   return {
@@ -150,7 +158,7 @@ export function buildMemberPicker(
       new ActionRowBuilder<UserSelectMenuBuilder>().addComponents(
         new UserSelectMenuBuilder()
           .setCustomId(encodeId(NS.MENU, `pick-${action}`))
-          .setPlaceholder('Choose a member')
+          .setPlaceholder(t.admin.pickerChoose)
           .setMinValues(1)
           .setMaxValues(1),
       ),
@@ -174,33 +182,35 @@ export function buildAdjustmentPicker(
   targetId: string,
   previews: AdjustmentPreview[],
   liveAdjustments: string[],
+  guildId?: string,
 ): BaseMessageOptions {
+  const t = guildId ? stringsIn(guildId) : stringsIn('');
   const current = previews[0];
 
   const select = new StringSelectMenuBuilder()
     .setCustomId(encodeId(NS.MENU, 'adjust-size', targetId))
-    .setPlaceholder('Choose a direction and a size')
+    .setPlaceholder(t.admin.adjPickerPlaceholder)
     .addOptions([
-      ...buildAdjustmentOptions(previews),
+      ...buildAdjustmentOptions(previews, guildId),
       ...(liveAdjustments.length > 0
         ? [
             new StringSelectMenuOptionBuilder()
               .setValue('clear')
-              .setLabel('Take back every adjustment on them')
-              .setDescription('Back to the community score alone'),
+              .setLabel(t.admin.adjClearOption)
+              .setDescription(t.admin.adjClearDesc),
           ]
         : []),
     ]);
 
   return {
     content: [
-      `**How much should <@${targetId}>'s score be leaned on?**`,
+      t.admin.adjPickerTitle({ mention: `<@${targetId}>` }),
       current
-        ? `They are in **${tierAt(current.currentTierIndex).roleName}** at **${current.currentScore.toFixed(2)}** right now.`
+        ? t.admin.adjPickerCurrent({ area: tierAt(current.currentTierIndex).roleName, score: current.currentScore.toFixed(2) })
         : null,
       '',
-      `One report's worth is one synthetic rating, weighted like a full-strength member. It fades over ${CREDITS.LIFETIME_DAYS} days and the real votes keep counting the whole time, so this leans on the number without taking it over.`,
-      ...(liveAdjustments.length > 0 ? ['', '**Already live**', ...liveAdjustments] : []),
+      t.admin.adjPickerUnit({ days: CREDITS.LIFETIME_DAYS }),
+      ...(liveAdjustments.length > 0 ? ['', t.admin.adjPickerLive, ...liveAdjustments] : []),
     ]
       .filter((line) => line !== null)
       .join('\n'),

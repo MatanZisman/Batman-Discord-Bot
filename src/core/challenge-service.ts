@@ -1,6 +1,7 @@
 import { type Client, type Guild, type GuildMember, type TextChannel } from 'discord.js';
 import { DAY_MS, HOUR_MS, LIMITS, tierAt, tierIndexByKey } from '../config.js';
 import * as repo from '../db/repo.js';
+import { stringsIn } from '../i18n/index.js';
 import { logger } from '../lib/logger.js';
 import { buildKingRequest } from '../ui/challenge.js';
 import { logAction } from './action-log.js';
@@ -48,8 +49,10 @@ export type OpenChallengeOutcome = { ok: true; message: string } | { ok: false; 
 export async function openChallenge(guild: Guild, member: GuildMember): Promise<OpenChallengeOutcome> {
   const record = repo.ensureMember(guild.id, member.id, member.joinedTimestamp ?? Date.now());
 
+  const t = stringsIn(guild.id);
+
   if (record.participating === 0) {
-    return { ok: false, message: 'You are outside the standing system, so there is nothing to review.' };
+    return { ok: false, message: t.review.notParticipating };
   }
 
   const tierIndex = record.tier_key ? tierIndexByKey(record.tier_key) : 0;
@@ -63,18 +66,15 @@ export async function openChallenge(guild: Guild, member: GuildMember): Promise<
   const previous = repo.getLatestChallenge(guild.id, member.id);
 
   if (previous && previous.state !== 'closed') {
-    return {
-      ok: false,
-      message: 'You already have a request waiting with the moderators. Asking again will not make it move faster.',
-    };
+    return { ok: false, message: t.review.alreadyOpen };
   }
 
   if (previous) {
     const cooldownMs = LIMITS.CHALLENGE_COOLDOWN_DAYS * DAY_MS;
     const elapsed = Date.now() - previous.opened_at;
     if (elapsed < cooldownMs) {
-      const readyAt = Math.floor((previous.opened_at + cooldownMs) / 1000);
-      return { ok: false, message: `You can ask for another review <t:${readyAt}:R>.` };
+      const daysLeft = Math.ceil((cooldownMs - elapsed) / DAY_MS);
+      return { ok: false, message: t.review.cooldown({ daysLeft }) };
     }
   }
 
@@ -106,16 +106,7 @@ export async function openChallenge(guild: Guild, member: GuildMember): Promise<
   repo.audit(guild.id, 'challenge_opened', member.id);
   logAction(guild, { kind: 'challenge_opened', actorId: member.id, invited: 0 });
 
-  return {
-    ok: true,
-    message: [
-      '**Your request has been sent to the moderators.**',
-      '',
-      'Your rating will be reviewed. If it is accepted you will see the change within 24 hours.',
-      '',
-      `Nobody who rated you has been contacted, and nobody has been told you asked. You can ask again in ${LIMITS.CHALLENGE_COOLDOWN_DAYS} days.`,
-    ].join('\n'),
-  };
+  return { ok: true, message: t.review.requestSent };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -258,6 +249,7 @@ async function postKingRequest(guild: Guild, challengeId: number): Promise<void>
       liveAdjustments: describeLiveAdjustments(challenge.guild_id, challenge.target_id),
       options,
       deadline: challenge.response_deadline,
+      guildId: guild.id,
     }),
   });
 

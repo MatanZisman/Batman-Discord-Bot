@@ -1,5 +1,6 @@
 import { PermissionFlagsBits, type CategoryChannel, type Guild, type GuildChannel } from 'discord.js';
 import * as repo from '../db/repo.js';
+import { stringsIn } from '../i18n/index.js';
 import { logger } from '../lib/logger.js';
 import { setupGuild } from './guild-setup.js';
 
@@ -115,7 +116,7 @@ export async function resumeGuild(guild: Guild): Promise<{ membersInitialised: n
  */
 export function maintenanceNotice(guildId: string | null): string | null {
   if (!guildId || !repo.isGuildPaused(guildId)) return null;
-  return 'The standing system is paused for maintenance right now. Nothing has been lost — your standing and every rating are exactly as you left them, and it will all be back shortly.';
+  return stringsIn(guildId).maintenance.notice;
 }
 
 /** Permission overwrite bit used above, exported for the tests. */

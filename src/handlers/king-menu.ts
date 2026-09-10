@@ -1,10 +1,14 @@
 import {
+  ActionRowBuilder,
   MessageFlags,
+  StringSelectMenuBuilder,
+  StringSelectMenuOptionBuilder,
   type ButtonInteraction,
   type StringSelectMenuInteraction,
   type TextChannel,
   type UserSelectMenuInteraction,
 } from 'discord.js';
+import { NS, encodeId } from '../lib/custom-ids.js';
 import { CREDITS, tierIndexByKey } from '../config.js';
 import { logAction } from '../core/action-log.js';
 import {
@@ -15,10 +19,13 @@ import {
   previewSizes,
 } from '../core/adjustments.js';
 import { publishRatingHub } from '../core/guild-setup.js';
+import { applyLanguage } from '../core/language.js';
 import { publishKingMenu } from '../core/king-panel.js';
 import { pauseGuild, resumeGuild } from '../core/maintenance.js';
 import { applyTierRoles, recalculateGuild, recalculateStanding } from '../core/standing-service.js';
 import * as repo from '../db/repo.js';
+import { stringsIn } from '../i18n/index.js';
+import { LOCALE_LABELS } from '../i18n/locale.js';
 import { logger } from '../lib/logger.js';
 import { respondPrivately } from '../lib/respond.js';
 import { buildAdjustmentPicker, buildMemberPicker } from '../ui/king-menu.js';
@@ -56,6 +63,7 @@ export async function routeKingMenu(interaction: MenuInteraction, action: string
 
   if (interaction.isStringSelectMenu()) {
     if (action === 'adjust-size') return doAdjust(interaction);
+    if (action === 'language-pick') return doSetLanguageFromSelect(interaction);
     return;
   }
 
@@ -65,13 +73,13 @@ export async function routeKingMenu(interaction: MenuInteraction, action: string
     case 'recalc':
       return doRecalculate(interaction);
     case 'adjust':
-      return respondPrivately(interaction, buildMemberPicker('adjust'));
+      return respondPrivately(interaction, buildMemberPicker('adjust', guild.id));
     case 'undo':
-      return respondPrivately(interaction, buildMemberPicker('undo'));
+      return respondPrivately(interaction, buildMemberPicker('undo', guild.id));
     case 'remove':
-      return respondPrivately(interaction, buildMemberPicker('remove'));
+      return respondPrivately(interaction, buildMemberPicker('remove', guild.id));
     case 'reinstate':
-      return respondPrivately(interaction, buildMemberPicker('reinstate'));
+      return respondPrivately(interaction, buildMemberPicker('reinstate', guild.id));
     case 'pause':
       return doPause(interaction);
     case 'resume':
@@ -82,7 +90,10 @@ export async function routeKingMenu(interaction: MenuInteraction, action: string
       return doNotice(interaction, false);
     case 'refresh-hub':
       return doRefreshHub(interaction);
+    case 'language':
+      return doLanguagePicker(interaction);
   }
+
 }
 
 /* -------------------------------------------------------------------------- */
@@ -108,12 +119,14 @@ async function finish(interaction: MenuInteraction, message: string): Promise<vo
 
 async function doRefresh(interaction: ButtonInteraction): Promise<void> {
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-  await finish(interaction, 'Refreshed.');
+  const t = stringsIn(interaction.guild!.id);
+  await finish(interaction, t.admin.refreshDone);
 }
 
 async function doRecalculate(interaction: ButtonInteraction): Promise<void> {
   const guild = interaction.guild!;
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  const t = stringsIn(guild.id);
 
   const count = await recalculateGuild(guild);
   logAction(guild, {
@@ -122,7 +135,7 @@ async function doRecalculate(interaction: ButtonInteraction): Promise<void> {
     summary: `recalculated ${count} standing(s)`,
   });
 
-  await finish(interaction, `Recomputed ${count} standing(s) against the current tuning values.`);
+  await finish(interaction, t.admin.recalcDone({ count }));
 }
 
 /**
@@ -139,9 +152,11 @@ async function showAdjustmentPicker(
   const guild = interaction.guild!;
   const record = repo.ensureMember(guild.id, targetId);
 
+  const t = stringsIn(guild.id);
+
   if (record.participating === 0) {
     await interaction.update({
-      content: `<@${targetId}> is outside the standing system, so there is no score to lean on. Reinstate them, or wait for them to join, first.`,
+      content: t.admin.adjustNotParticipating({ mention: `<@${targetId}>` }),
       components: [],
     });
     return;
@@ -152,7 +167,7 @@ async function showAdjustmentPicker(
   const previews = await previewSizes(guild, targetId);
   const live = describeLiveAdjustments(guild.id, targetId);
 
-  await interaction.editReply(buildAdjustmentPicker(targetId, previews, live));
+  await interaction.editReply(buildAdjustmentPicker(targetId, previews, live, guild.id));
 }
 
 async function doAdjust(interaction: StringSelectMenuInteraction): Promise<void> {
@@ -183,23 +198,28 @@ async function doAdjust(interaction: StringSelectMenuInteraction): Promise<void>
     summary: `${rawDirection === 'ease' ? 'eased' : 'pushed'} <@${targetId}> by ${reports} report(s)' worth`,
   });
 
+  const t = stringsIn(guild.id);
   const { preview } = outcome;
-  const undo =
-    preview.reportsToUndo !== null
-      ? ` **${preview.reportsToUndo}** more report(s) at the top of the scale would put them back.`
-      : '';
-
-  const blocked = preview.blockedBy
-    ? `\n\n**Their area did not move, and will not on this alone:** ${preview.blockedBy}. Adjustments move the score and never the headcount or consensus gates, so pressure cannot place somebody the community has not actually rated. The score is recorded and will take effect the moment enough real people have weighed in.`
+  const undoStr = preview.reportsToUndo !== null
+    ? t.admin.adjustUndoStr({ count: preview.reportsToUndo })
+    : '';
+  const blockedStr = preview.blockedBy
+    ? t.admin.adjustBlockedStr({ reason: preview.blockedBy })
     : '';
 
   await finish(
     interaction,
-    [
-      `<@${targetId}> is now in **${areaName(outcome.appliedTierIndex)}** at **${preview.projectedScore.toFixed(2)}**, from ${preview.currentScore.toFixed(2)}.${undo}${blocked}`,
-      '',
-      `The community score never stopped running, so this can be outvoted rather than waited out. It fades over ${CREDITS.LIFETIME_DAYS} days. ${outcome.moved ? 'They were told their area changed, with no reason given and no mention of who decided.' : 'Their area did not move, so they were told nothing.'}`,
-    ].join('\n'),
+    t.admin.adjustApplied({
+      mention: `<@${targetId}>`,
+      area: areaName(outcome.appliedTierIndex),
+      score: preview.projectedScore.toFixed(2),
+      from: preview.currentScore.toFixed(2),
+      undo: undoStr,
+      blocked: blockedStr,
+      days: CREDITS.LIFETIME_DAYS,
+      reports,
+      moved: outcome.moved,
+    }),
   );
 }
 
@@ -212,8 +232,10 @@ async function doUndo(
 
   const undone = await clearAdjustments(guild, targetId, interaction.user.id);
 
+  const t = stringsIn(guild.id);
+
   if (undone === 0) {
-    await finish(interaction, `<@${targetId}> is not carrying any adjustments.`);
+    await finish(interaction, t.admin.adjustClearedNone({ mention: `<@${targetId}>` }));
     return;
   }
 
@@ -223,11 +245,7 @@ async function doUndo(
     summary: `took back ${undone} adjustment(s) on <@${targetId}>`,
   });
 
-  const record = repo.getMember(guild.id, targetId);
-  await finish(
-    interaction,
-    `Took back ${undone} adjustment(s). <@${targetId}> is on the community score alone, which puts them in **${record?.tier_key ? areaName(tierIndexByKey(record.tier_key)) : 'their default area'}**.`,
-  );
+  await finish(interaction, t.admin.adjustCleared({ mention: `<@${targetId}>`, count: undone }));
 }
 
 async function doRemove(interaction: UserSelectMenuInteraction, targetId: string): Promise<void> {
@@ -250,10 +268,8 @@ async function doRemove(interaction: UserSelectMenuInteraction, targetId: string
     summary: `removed <@${targetId}> from the standing system`,
   });
 
-  await finish(
-    interaction,
-    `<@${targetId}> is out and cannot rejoin themselves. Their ratings are suspended rather than deleted, so reinstating puts things back as they were.`,
-  );
+  const t = stringsIn(guild.id);
+  await finish(interaction, t.admin.removeDone({ mention: `<@${targetId}>` }));
 
   for (const id of affected) {
     recalculateStanding(guild, id).catch(() => undefined);
@@ -274,15 +290,14 @@ async function doReinstate(interaction: UserSelectMenuInteraction, targetId: str
     summary: `reinstated <@${targetId}>`,
   });
 
-  await finish(
-    interaction,
-    `<@${targetId}> can rejoin whenever they choose to. They stay outside the system until they press Join, and their suspended ratings resume then.`,
-  );
+  const t = stringsIn(guild.id);
+  await finish(interaction, t.admin.reinstateDone({ mention: `<@${targetId}>` }));
 }
 
 async function doPause(interaction: ButtonInteraction): Promise<void> {
   const guild = interaction.guild!;
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  const t = stringsIn(guild.id);
 
   const report = await pauseGuild(guild);
   logAction(guild, {
@@ -293,20 +308,17 @@ async function doPause(interaction: ButtonInteraction): Promise<void> {
 
   await finish(
     interaction,
-    [
-      `**Paused.** Hidden: ${report.hidden.length > 0 ? report.hidden.join(', ') : 'nothing needed hiding'}.`,
-      report.failures.length > 0 ? `Could not hide: ${report.failures.join('; ')}` : null,
-      '',
-      'Every rating and standing is untouched. This channel stays visible so you can resume.',
-    ]
-      .filter(Boolean)
-      .join('\n'),
+    t.admin.pauseDone({
+      hidden: report.hidden.length > 0 ? report.hidden.join(', ') : '',
+      failures: report.failures.length > 0 ? `Could not hide: ${report.failures.join('; ')}` : null,
+    }),
   );
 }
 
 async function doResume(interaction: ButtonInteraction): Promise<void> {
   const guild = interaction.guild!;
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  const t = stringsIn(guild.id);
 
   try {
     const { membersInitialised } = await resumeGuild(guild);
@@ -315,14 +327,11 @@ async function doResume(interaction: ButtonInteraction): Promise<void> {
       actorId: interaction.user.id,
       summary: 'resumed the standing system',
     });
-    await finish(
-      interaction,
-      `**Back up.** ${membersInitialised} member(s) re-checked. Standings are exactly what they were before the pause, and anything deleted during the downtime was rebuilt.`,
-    );
+    await finish(interaction, t.admin.resumeDone({ count: membersInitialised }));
   } catch (error) {
     await finish(
       interaction,
-      `Could not resume: ${error instanceof Error ? error.message : String(error)}`,
+      t.admin.resumeError({ error: error instanceof Error ? error.message : String(error) }),
     );
   }
 }
@@ -330,6 +339,7 @@ async function doResume(interaction: ButtonInteraction): Promise<void> {
 async function doNotice(interaction: ButtonInteraction, on: boolean): Promise<void> {
   const guild = interaction.guild!;
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  const t = stringsIn(guild.id);
 
   if (!on) {
     repo.setJoinNoticeActive(guild.id, false);
@@ -338,10 +348,7 @@ async function doNotice(interaction: ButtonInteraction, on: boolean): Promise<vo
       actorId: interaction.user.id,
       summary: 'switched the launch notice off',
     });
-    await finish(
-      interaction,
-      'Off. Nobody else will be messaged, and everyone already told stays told, so switching it back on will not repeat anyone.',
-    );
+    await finish(interaction, t.admin.noticeOff);
     return;
   }
 
@@ -355,23 +362,13 @@ async function doNotice(interaction: ButtonInteraction, on: boolean): Promise<vo
     summary: 'switched the launch notice on',
   });
 
-  await finish(
-    interaction,
-    [
-      `**On.** ${pending} member(s) will each get one private DM, the first time they join a voice channel from now on.`,
-      skipped > 0
-        ? `${skipped} were skipped because they have already rated someone or already opted out.`
-        : null,
-      'Nobody is messaged twice, including across restarts.',
-    ]
-      .filter(Boolean)
-      .join('\n'),
-  );
+  await finish(interaction, t.admin.noticeOn({ pending, skipped }));
 }
 
 async function doRefreshHub(interaction: ButtonInteraction): Promise<void> {
   const guild = interaction.guild!;
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  const t = stringsIn(guild.id);
 
   const settings = repo.getGuildSettings(guild.id);
   const channel = settings?.rating_channel_id
@@ -379,12 +376,49 @@ async function doRefreshHub(interaction: ButtonInteraction): Promise<void> {
     : null;
 
   if (!channel?.isTextBased()) {
-    await finish(interaction, 'I could not find the public channel. Run `/standing-setup` instead.');
+    await finish(interaction, t.admin.refreshHubMissing);
     return;
   }
 
   await publishRatingHub(channel as TextChannel).catch((error) =>
     logger.error('Could not republish the rating hub', error),
   );
-  await finish(interaction, `Reposted the explanation and buttons in <#${channel.id}>.`);
+  await finish(interaction, t.admin.refreshHubDone({ channel: channel.id }));
+}
+
+async function doLanguagePicker(interaction: ButtonInteraction): Promise<void> {
+  const t = stringsIn(interaction.guild!.id);
+
+  const select = new StringSelectMenuBuilder()
+    .setCustomId(encodeId(NS.KING, 'language-pick'))
+    .setPlaceholder(t.admin.languageBtn)
+    .addOptions(
+      Object.entries(LOCALE_LABELS).map(([value, label]) =>
+        new StringSelectMenuOptionBuilder().setValue(value).setLabel(label),
+      ),
+    );
+
+  await interaction.reply({
+    content: t.admin.languageBtn,
+    components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select)],
+    flags: MessageFlags.Ephemeral,
+  });
+}
+
+async function doSetLanguageFromSelect(interaction: StringSelectMenuInteraction): Promise<void> {
+  const guild = interaction.guild!;
+  const locale = interaction.values[0] ?? 'en';
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  const result = await applyLanguage(guild, locale);
+
+  logAction(guild, {
+    kind: 'admin',
+    actorId: interaction.user.id,
+    summary: `changed language to ${locale}`,
+  });
+
+  // After language change, stringsIn now returns the new locale
+  const t = stringsIn(guild.id);
+  await finish(interaction, t.admin.languageSwitched({ label: result.label }));
 }

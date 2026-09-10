@@ -470,7 +470,7 @@ export async function setupGuild(guild: Guild): Promise<SetupReport> {
  * remember slash commands.
  */
 export async function publishRatingHub(channel: TextChannel): Promise<void> {
-  const payload = buildRatingHubMessage();
+  const payload = buildRatingHubMessage(channel.guild.id);
   const mine = await findOwnPinnedMessage(channel);
 
   if (mine) {

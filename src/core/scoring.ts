@@ -7,6 +7,7 @@ import {
   TIER_COUNT,
   tierAt,
 } from '../config.js';
+import { stringsIn } from '../i18n/index.js';
 
 /**
  * ============================================================================
@@ -521,30 +522,32 @@ export function reportsToReach(
  * Human-readable explanation of a standing, for the private `/my-standing`
  * view and the KING's challenge report. Never names individual voters.
  */
-export function explainStanding(standing: Standing): string {
+export function explainStanding(standing: Standing, guildId?: string): string {
+  const t = stringsIn(guildId ?? '');
+
   const tier = tierAt(standing.tierIndex);
   const lines = [
-    `Tier: ${tier.roleName}`,
-    `Score: ${standing.score.toFixed(2)} / ${SCORING.MAX_RATING} (lower is better)`,
+    t.standing.explainTier({ area: tier.roleName }),
+    t.standing.explainScore({ score: standing.score.toFixed(2), max: SCORING.MAX_RATING }),
     // Reported as a fact about the ratings, not as the derivation of the score
     // above it. A score can include a moderator adjustment, and "based on 0
     // ratings: 3.62" reads as a bug to the member looking at it. This wording
     // stays true either way without telling them a moderator was involved,
     // which the review design deliberately keeps quiet.
-    `Active ratings counting toward it: ${standing.raterCount} (combined trust ${standing.effectiveWeight.toFixed(2)})`,
+    t.standing.explainRaters({ count: standing.raterCount, trust: standing.effectiveWeight.toFixed(2) }),
   ];
 
   const nextTier = TIERS[standing.tierIndex + 1];
   if (nextTier) {
     const nextGate = standing.gates[standing.tierIndex + 1];
     if (nextGate && !nextGate.passed) {
-      lines.push(`Distance from ${nextTier.roleName}: ${nextGate.failedGates.join('; ')}`);
+      lines.push(t.standing.explainDistance({ area: nextTier.roleName, gates: nextGate.failedGates.join('; ') }));
     }
   }
 
   if (standing.ignoredVotes.length > 0) {
     const expired = standing.ignoredVotes.filter((v) => v.reason === 'expired').length;
-    if (expired > 0) lines.push(`${expired} older rating(s) have expired and no longer count.`);
+    if (expired > 0) lines.push(t.standing.explainExpired({ count: expired }));
   }
 
   return lines.join('\n');

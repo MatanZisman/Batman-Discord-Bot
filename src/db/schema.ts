@@ -30,7 +30,10 @@ CREATE TABLE IF NOT EXISTS guilds (
   paused_at          INTEGER,
   -- When the one-time "the system is live" DM was switched on. Members are
   -- told on their first voice join after this moment, never before it.
-  notice_active_at   INTEGER
+  notice_active_at   INTEGER,
+  -- Language for all bot messages in this guild. NULL means English (default).
+  -- Values: 'en' | 'he'
+  locale             TEXT NOT NULL DEFAULT 'en'
 );
 
 -- Small key/value scratchpad for things the bot needs to remember across
@@ -220,4 +223,5 @@ export const MIGRATIONS: string[] = [
   // member on a value with no code path left to lapse it. Idempotent by the
   // same token: after the first run there is nothing left to blank.
   'UPDATE members SET override_score = NULL, override_tier_key = NULL, override_until = NULL',
+  "ALTER TABLE guilds ADD COLUMN locale TEXT NOT NULL DEFAULT 'en'",
 ];

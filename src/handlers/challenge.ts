@@ -9,6 +9,7 @@ import { SERVER_LAYOUT, tierAt, tierIndexByKey } from '../config.js';
 import * as repo from '../db/repo.js';
 import { openChallenge, resolveChallenge, type KingDecision } from '../core/challenge-service.js';
 import { publishKingMenu } from '../core/king-panel.js';
+import { stringsIn } from '../i18n/index.js';
 
 /* -------------------------------------------------------------------------- */
 /* Asking for a review                                                        */
@@ -24,7 +25,8 @@ export async function handleOpenChallenge(
 
   const member = await guild.members.fetch(interaction.user.id).catch(() => null);
   if (!member) {
-    await interaction.editReply('Could not read your server membership.');
+    const t = stringsIn(guild.id);
+    await interaction.editReply(t.genericError);
     return;
   }
 
@@ -60,9 +62,11 @@ function isKing(interaction: ButtonInteraction | StringSelectMenuInteraction): b
 async function guardKing(
   interaction: ButtonInteraction | StringSelectMenuInteraction,
 ): Promise<repo.ChallengeRecord | null> {
+  const t = stringsIn(interaction.guildId ?? '');
+
   if (!isKing(interaction)) {
     await interaction.reply({
-      content: `Only the ${SERVER_LAYOUT.kingRoleName} role can decide a review.`,
+      content: t.guards.kingReviewOnly({ king: SERVER_LAYOUT.kingRoleName }),
       flags: MessageFlags.Ephemeral,
     });
     return null;
@@ -70,13 +74,13 @@ async function guardKing(
 
   const challenge = repo.getChallenge(Number(interaction.customId.split(':')[2]));
   if (!challenge) {
-    await interaction.reply({ content: 'That request no longer exists.', flags: MessageFlags.Ephemeral });
+    await interaction.reply({ content: t.guards.requestMissing, flags: MessageFlags.Ephemeral });
     return null;
   }
 
   if (challenge.state === 'closed') {
     await interaction.reply({
-      content: 'That request has already been settled by someone else.',
+      content: t.guards.requestClosed,
       flags: MessageFlags.Ephemeral,
     });
     return null;
@@ -104,13 +108,12 @@ export async function handleKingAdjust(interaction: StringSelectMenuInteraction)
 
   const record = repo.getMember(challenge.guild_id, challenge.target_id);
   const area = record?.tier_key ? tierAt(tierIndexByKey(record.tier_key)).roleName : 'unchanged';
+  const t = stringsIn(challenge.guild_id);
 
   await interaction.followUp({
-    content: [
-      `Done. ${reports} report(s)' worth ${rawDirection === 'ease' ? 'of relief' : 'of pressure'}, and they now sit in **${area}** at **${record?.score?.toFixed(2) ?? '—'}**.`,
-      '',
-      'The community score is still running underneath, so this can be outvoted. They were not told a review decided anything — they just see their area change, if it moved.',
-    ].join('\n'),
+    content: t.review.settled({
+      action: `${reports} report(s)' worth ${rawDirection === 'ease' ? 'of relief' : 'of pressure'}, now in **${area}** at **${record?.score?.toFixed(2) ?? '—'}**`,
+    }),
     flags: MessageFlags.Ephemeral,
   });
 
@@ -128,11 +131,11 @@ export async function handleKingClose(
   await interaction.deferUpdate();
   await resolveChallenge(interaction.client, challenge, { type } as KingDecision, interaction.user.id);
 
+  const t = stringsIn(challenge.guild_id);
   await interaction.followUp({
-    content:
-      type === 'dismiss'
-        ? 'Dismissed. Nothing changed, and they were not told.'
-        : 'Every adjustment on them is taken back. They are on the community score alone.',
+    content: t.review.settled({
+      action: type === 'dismiss' ? 'Dismissed. Nothing changed.' : 'Every adjustment taken back.',
+    }),
     flags: MessageFlags.Ephemeral,
   });
 

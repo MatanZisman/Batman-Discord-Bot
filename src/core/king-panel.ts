@@ -23,7 +23,7 @@ export async function publishKingMenu(guild: Guild): Promise<void> {
   if (!channel || channel.type !== ChannelType.GuildText) return;
 
   const text = channel as TextChannel;
-  const payload = buildKingMenuMessage(collectAdminStats(guild.id), settings.king_channel_id);
+  const payload = buildKingMenuMessage(guild.id, collectAdminStats(guild.id), settings.king_channel_id);
   const existing = await findOwnPanel(text);
 
   if (existing) {

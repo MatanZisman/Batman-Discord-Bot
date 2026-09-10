@@ -1,6 +1,7 @@
 import type { GuildMember, VoiceState } from 'discord.js';
 import { HOUR_MS, SERVER_LAYOUT, TIERS } from '../config.js';
 import * as repo from '../db/repo.js';
+import { stringsIn } from '../i18n/index.js';
 import { logger } from '../lib/logger.js';
 import { maintenanceNotice } from './maintenance.js';
 
@@ -121,30 +122,25 @@ async function deliver(member: GuildMember, flavour: Flavour): Promise<void> {
 }
 
 function buildNoticeBody(guildId: string, flavour: Flavour): string {
+  const t = stringsIn(guildId);
   const settings = repo.getGuildSettings(guildId);
   const hub = settings?.rating_channel_id ? `<#${settings.rating_channel_id}>` : 'the standing channel';
   const firstTier = TIERS[0]?.roleName ?? 'the first area';
 
-  const opening =
-    flavour === 'arrival'
-      ? [
-          `**Welcome — one thing to know**`,
-          '',
-          `This server has a community rating system for how people are to play with. Teammates rate each other privately, and that decides which set of channels you see. You start in **${firstTier}**, along with everyone else.`,
-        ]
-      : [
-          `**From CS2 Israel by WqLoNN - There is something new in the server:**`,
-          '',
-          `There is now a community rating system for how people are to play with. Teammates rate each other privately, and that decides which set of channels you see. You start in **${firstTier}**, along with everyone else.`,
-        ];
+  const greeting = flavour === 'arrival' ? t.dm.arrivalGreeting : t.dm.voiceGreeting;
+  const body = flavour === 'arrival'
+    ? t.dm.arrivalBody({ firstArea: firstTier })
+    : t.dm.voiceBody({ firstArea: firstTier });
 
   return [
-    ...opening,
+    greeting,
     '',
-    `The short version: ratings are private, nobody can see who rated them or what anyone else was given, and no channel ever announces anyone's rating. You can rate people, see your own standing, ask for a re-review if you think yours is wrong, or leave the system entirely.`,
+    body,
     '',
-    `Everything is explained in ${hub}, and anything you do there is visible only to you.`,
+    t.dm.noticeShort,
     '',
-    `This is the only message I will send you about this. If you would rather not take part at all, there is a button in ${hub} to opt out, and the ${SERVER_LAYOUT.kingRoleName} role can answer questions.`,
+    t.dm.noticeHub({ channel: hub }),
+    '',
+    t.dm.noticeOptOut({ channel: hub, king: SERVER_LAYOUT.kingRoleName }),
   ].join('\n');
 }

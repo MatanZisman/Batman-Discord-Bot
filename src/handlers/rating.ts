@@ -12,6 +12,7 @@ import * as repo from '../db/repo.js';
 import { logAction } from '../core/action-log.js';
 import { explainStanding } from '../core/scoring.js';
 import { evaluateStanding, recalculateStanding } from '../core/standing-service.js';
+import { stringsIn } from '../i18n/index.js';
 import { logger } from '../lib/logger.js';
 import {
   buildPlayerPicker,
@@ -72,13 +73,14 @@ export async function startRatingSession(
     ? ('joinedTimestamp' in interaction.member ? (interaction.member.joinedTimestamp ?? Date.now()) : Date.now())
     : Date.now());
 
+  const t = stringsIn(guild.id);
+
   // Opted-out members cannot hand out ratings. Offer them the way back in
   // rather than a dead end.
   if (rater.participating === 0) {
     await reply(interaction, {
-      content:
-        'You are currently outside the standing system, so you cannot rate other players. You can rejoin below — rejoining means others may rate you too.',
-      ...buildParticipationMenu(false),
+      content: t.rating.notParticipating,
+      ...buildParticipationMenu(false, guild.id),
     });
     return;
   }
@@ -89,6 +91,7 @@ export async function startRatingSession(
     buildPlayerPicker({
       ratedSoFar: session.ratedCount,
       remainingToday: remainingVotesToday(guild.id, interaction.user.id),
+      guildId: guild.id,
     }),
   );
 }
@@ -101,7 +104,7 @@ export async function handlePlayerPicked(interaction: UserSelectMenuInteraction)
   const targetId = interaction.values[0];
   if (!targetId) return;
 
-  const problem = await validateTarget(guild, interaction.user.id, targetId);
+  const problem = await validateTarget(guild, interaction.user.id, targetId, guild.id);
   if (problem) {
     await interaction.update({ content: problem, components: [] });
     await followUpPicker(interaction);
@@ -109,7 +112,7 @@ export async function handlePlayerPicked(interaction: UserSelectMenuInteraction)
   }
 
   const existing = repo.getVote(guild.id, interaction.user.id, targetId);
-  const cooldown = describeUpdateCooldown(existing);
+  const cooldown = describeUpdateCooldown(existing, guild.id);
   if (cooldown) {
     await interaction.update({ content: cooldown, components: [] });
     await followUpPicker(interaction);
@@ -117,7 +120,7 @@ export async function handlePlayerPicked(interaction: UserSelectMenuInteraction)
   }
 
   const existingValue = existing?.status === 'active' ? existing.value : null;
-  await interaction.update(buildRatingScale(targetId, existingValue));
+  await interaction.update(buildRatingScale(targetId, existingValue, guild.id));
 }
 
 /** A rating value was chosen. Save it and recompute the target's standing. */
@@ -130,14 +133,16 @@ export async function handleRatingValue(interaction: StringSelectMenuInteraction
   const rawValue = Number(interaction.values[0]);
 
   if (!targetId || Number.isNaN(rawValue)) {
-    await interaction.update({ content: 'Something went wrong reading that rating.', components: [] });
+    const t = stringsIn(interaction.guild?.id ?? '');
+    await interaction.update({ content: t.rating.errorBadRating, components: [] });
     return;
   }
 
   const value = Math.min(Math.max(Math.round(rawValue), SCORING.MIN_RATING), SCORING.MAX_RATING);
+  const t = stringsIn(guild.id);
 
   // Re-validate: the state could have changed while the panel sat open.
-  const problem = await validateTarget(guild, interaction.user.id, targetId);
+  const problem = await validateTarget(guild, interaction.user.id, targetId, guild.id);
   if (problem) {
     await interaction.update({ content: problem, components: [] });
     await followUpPicker(interaction);
@@ -145,7 +150,7 @@ export async function handleRatingValue(interaction: StringSelectMenuInteraction
   }
 
   const existing = repo.getVote(guild.id, interaction.user.id, targetId);
-  const cooldown = describeUpdateCooldown(existing);
+  const cooldown = describeUpdateCooldown(existing, guild.id);
   if (cooldown) {
     await interaction.update({ content: cooldown, components: [] });
     await followUpPicker(interaction);
@@ -155,7 +160,7 @@ export async function handleRatingValue(interaction: StringSelectMenuInteraction
   const isNewVote = !existing || existing.status !== 'active';
   if (isNewVote && remainingVotesToday(guild.id, interaction.user.id) <= 0) {
     await interaction.update({
-      content: `You have used all ${LIMITS.MAX_NEW_VOTES_PER_DAY} new ratings for today. This limit exists so no group can rate someone down in a single evening. Come back tomorrow.`,
+      content: t.rating.errorDailyCap({ cap: LIMITS.MAX_NEW_VOTES_PER_DAY }),
       components: [],
     });
     return;
@@ -174,7 +179,7 @@ export async function handleRatingValue(interaction: StringSelectMenuInteraction
   const session = getSession(guild.id, interaction.user.id);
   session.ratedCount += 1;
 
-  await interaction.update(buildRatingSaved(targetId, value, result.previousValue !== null));
+  await interaction.update(buildRatingSaved(targetId, value, result.previousValue !== null, guild.id));
 
   // Recalculating touches roles and may DM the target, so do it after the UI
   // has already responded to keep the interaction snappy.
@@ -192,6 +197,7 @@ export async function handleRatingBack(interaction: ButtonInteraction): Promise<
     buildPlayerPicker({
       ratedSoFar: session.ratedCount,
       remainingToday: remainingVotesToday(guild.id, interaction.user.id),
+      guildId: guild.id,
     }),
   );
 }
@@ -204,7 +210,7 @@ export async function handleRatingDone(interaction: ButtonInteraction): Promise<
   const count = sessions.get(key)?.ratedCount ?? 0;
   sessions.delete(key);
 
-  await interaction.update(buildSessionClosed(count));
+  await interaction.update(buildSessionClosed(count, guild.id));
 }
 
 /**
@@ -218,12 +224,12 @@ export async function showOwnStanding(
   if (!guild) return;
 
   const record = repo.ensureMember(guild.id, interaction.user.id);
+  const t = stringsIn(guild.id);
 
   if (record.participating === 0) {
     await reply(interaction, {
-      content:
-        'You are outside the standing system. You hold no standing and no ratings, and you can see the open channels only.',
-      ...buildParticipationMenu(false),
+      content: t.standing.notParticipating,
+      ...buildParticipationMenu(false, guild.id),
     });
     return;
   }
@@ -231,11 +237,11 @@ export async function showOwnStanding(
   const { standing } = await evaluateStanding(guild, interaction.user.id, record);
 
   const lines = [
-    `**Your ${tierAt(standing.tierIndex).roleName} standing**`,
+    t.standing.header({ area: tierAt(standing.tierIndex).roleName }),
     '',
-    explainStanding(standing),
+    explainStanding(standing, guild.id),
     '',
-    'Who rated you is not stored in any form that can be looked up, by you or by anyone else.',
+    t.standing.who,
   ];
 
   await reply(interaction, { content: lines.join('\n') });
@@ -245,16 +251,18 @@ export async function showOwnStanding(
 /* Validation                                                                 */
 /* -------------------------------------------------------------------------- */
 
-async function validateTarget(guild: Guild, raterId: string, targetId: string): Promise<string | null> {
-  if (targetId === raterId) return 'You cannot rate yourself.';
+async function validateTarget(guild: Guild, raterId: string, targetId: string, guildId?: string): Promise<string | null> {
+  const t = stringsIn(guildId ?? '');
+
+  if (targetId === raterId) return t.rating.errorSelf;
 
   const target = await guild.members.fetch(targetId).catch(() => null);
-  if (!target) return 'That player is not in this server.';
-  if (target.user.bot) return 'Bots are not part of the standing system.';
+  if (!target) return t.rating.errorNotMember;
+  if (target.user.bot) return t.rating.errorBot;
 
   const targetRecord = repo.ensureMember(guild.id, targetId, target.joinedTimestamp ?? Date.now());
   if (targetRecord.participating === 0) {
-    return 'That player has chosen not to take part in the standing system, so they cannot be rated.';
+    return t.rating.errorOptedOut;
   }
 
   return null;
@@ -264,7 +272,7 @@ async function validateTarget(guild: Guild, raterId: string, targetId: string): 
  * Ratings can be changed, but not repeatedly within the cooldown. This stops
  * someone from oscillating a rating to nudge a target across a boundary.
  */
-function describeUpdateCooldown(existing: repo.VoteRecord | undefined): string | null {
+function describeUpdateCooldown(existing: repo.VoteRecord | undefined, guildId?: string): string | null {
   if (!existing || existing.status !== 'active') return null;
 
   const cooldownMs = LIMITS.VOTE_UPDATE_COOLDOWN_MINUTES * MINUTE_MS;
@@ -272,7 +280,8 @@ function describeUpdateCooldown(existing: repo.VoteRecord | undefined): string |
   if (elapsed >= cooldownMs) return null;
 
   const minutesLeft = Math.max(1, Math.ceil((cooldownMs - elapsed) / MINUTE_MS));
-  return `You just rated that player. You can change that rating again in about ${minutesLeft} minute(s).`;
+  const t = stringsIn(guildId ?? '');
+  return t.rating.cooldownMsg({ minutesLeft });
 }
 
 /* -------------------------------------------------------------------------- */
@@ -302,6 +311,7 @@ async function followUpPicker(
   await interaction.followUp({
     ...buildPlayerPicker({
       ratedSoFar: session.ratedCount,
+      guildId: guild.id,
       remainingToday: remainingVotesToday(guild.id, interaction.user.id),
     }),
     flags: MessageFlags.Ephemeral,

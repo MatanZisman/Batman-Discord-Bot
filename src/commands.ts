@@ -19,6 +19,8 @@ import { showRevertConfirmation } from './handlers/revert.js';
 import { checkAdminAccess } from './handlers/guards.js';
 import { logAction } from './core/action-log.js';
 
+import { stringsFor, stringsIn, type Locale } from './i18n/index.js';
+
 /**
  * Slash command surface. Deliberately small: everything a normal member needs
  * is also reachable from the buttons on the pinned message in the rating
@@ -26,132 +28,147 @@ import { logAction } from './core/action-log.js';
  */
 const GUILD_ONLY = [InteractionContextType.Guild];
 
-export const COMMANDS = [
-  new SlashCommandBuilder()
-    .setName('rate')
-    .setDescription('Privately rate the players you have been playing with')
-    .setContexts(GUILD_ONLY),
+/**
+ * Builds the command array with descriptions from the given locale.
+ * Command *names* are always English (they are the Discord identifiers and
+ * must never change). Only descriptions are locale-aware.
+ *
+ * Used when registering commands for a specific guild after a language change.
+ */
+export function buildCommands(locale: Locale): ReturnType<typeof buildCommandsFor> {
+  return buildCommandsFor(locale);
+}
 
-  new SlashCommandBuilder()
-    .setName('my-standing')
-    .setDescription('See your own standing. Only you can see the reply.')
-    .setContexts(GUILD_ONLY),
+function buildCommandsFor(locale: Locale): object[] {
+  const d = stringsFor(locale).commandDescs;
+  const CREDITS_DEFAULT = CREDITS.OFFERED_SIZES[1] ?? 5;
 
-  new SlashCommandBuilder()
-    .setName('challenge')
-    .setDescription('Ask the people who rated you to take another look')
-    .setContexts(GUILD_ONLY),
+  return [
+    new SlashCommandBuilder()
+      .setName('rate')
+      .setDescription(d.rate)
+      .setContexts(GUILD_ONLY),
 
-  new SlashCommandBuilder()
-    .setName('participation')
-    .setDescription('Join or leave the community standing system')
-    .setContexts(GUILD_ONLY),
+    new SlashCommandBuilder()
+      .setName('my-standing')
+      .setDescription(d.myStanding)
+      .setContexts(GUILD_ONLY),
 
-  /*
-   * The three admin commands below deliberately carry no
-   * setDefaultMemberPermissions. Discord's own gate can only test built-in
-   * permissions, and a KING is a plain role — gating on Manage Server would
-   * hide these commands from the very people who are supposed to run them.
-   * checkAdminAccess() enforces the real rule instead: KING role (or Manage
-   * Server), inside the KING channel.
-   */
-  new SlashCommandBuilder()
-    .setName('standing-setup')
-    .setDescription('Create or repair the roles, categories and permissions this system needs')
-    .setContexts(GUILD_ONLY),
+    new SlashCommandBuilder()
+      .setName('challenge')
+      .setDescription(d.challenge)
+      .setContexts(GUILD_ONLY),
 
-  new SlashCommandBuilder()
-    .setName('standing-revert')
-    .setDescription('Undo everything this bot created and erase all its data for this server')
-    .setContexts(GUILD_ONLY)
-    .addBooleanOption((option) =>
-      option
-        .setName('include-unrecorded')
-        .setDescription('Also delete roles and channels matching my config that I have no record of creating'),
-    ),
+    new SlashCommandBuilder()
+      .setName('participation')
+      .setDescription(d.participation)
+      .setContexts(GUILD_ONLY),
 
-  new SlashCommandBuilder()
-    .setName('standing-admin')
-    .setDescription('Maintenance tools')
-    .setContexts(GUILD_ONLY)
-    .addSubcommand((sub) =>
-      sub
-        .setName('recalculate')
-        .setDescription('Recompute every standing, e.g. after changing the tuning values'),
-    )
-    .addSubcommand((sub) =>
-      sub
-        .setName('distribution')
-        .setDescription('How many members sit in each area. Counts only, never names.'),
-    )
-    .addSubcommand((sub) =>
-      sub
-        .setName('adjust')
-        .setDescription("Lean on a member's score without taking it over")
-        .addUserOption((o) => o.setName('user').setDescription('Who to adjust').setRequired(true))
-        .addStringOption((o) =>
-          o
-            .setName('direction')
-            .setDescription('Which way to lean, or undo what is already there')
-            .setRequired(true)
-            .addChoices(
-              { name: 'ease off — argue the community has been harsh', value: 'ease' },
-              { name: 'push down — argue the community has been generous', value: 'push' },
-              { name: 'undo — take back every adjustment on them', value: 'clear' },
-            ),
-        )
-        .addIntegerOption((o) =>
-          o
-            .setName('reports')
-            .setDescription(
-              `How many reports' worth. Defaults to ${CREDITS.OFFERED_SIZES[1] ?? 5}. Ignored when undoing.`,
-            )
-            .setMinValue(1)
-            .setMaxValue(CREDITS.MAX_REPORTS_PER_GRANT),
-        ),
-    )
-    .addSubcommand((sub) =>
-      sub
-        .setName('remove')
-        .setDescription('Remove a member from the system. They cannot rejoin themselves.')
-        .addUserOption((o) => o.setName('user').setDescription('Who to remove').setRequired(true)),
-    )
-    .addSubcommand((sub) =>
-      sub
-        .setName('reinstate')
-        .setDescription('Undo a removal, letting the member choose to rejoin')
-        .addUserOption((o) => o.setName('user').setDescription('Who to reinstate').setRequired(true)),
-    )
-    .addSubcommand((sub) =>
-      sub
-        .setName('pause')
-        .setDescription('Hide the system for maintenance. Keeps every rating and standing.'),
-    )
-    .addSubcommand((sub) =>
-      sub.setName('resume').setDescription('Bring the system back after a pause'),
-    )
-    .addSubcommand((sub) =>
-      sub
-        .setName('refresh-hub')
-        .setDescription('Repost the pinned explanation and buttons in the public channel'),
-    )
-    .addSubcommand((sub) =>
-      sub
-        .setName('notice')
-        .setDescription('The one-time DM telling each member the system exists')
-        .addStringOption((o) =>
-          o
-            .setName('action')
-            .setDescription('Turn it on, turn it off, or see how far it has got')
-            .setRequired(true)
-            .addChoices(
-              { name: 'on — start telling people on their first voice join', value: 'on' },
-              { name: 'off — stop telling anyone new', value: 'off' },
-              { name: 'status — how many are still to be told', value: 'status' },
-            ),
-        ),
-    ),
-].map((command) => command.toJSON());
+    new SlashCommandBuilder()
+      .setName('standing-setup')
+      .setDescription(d.standingSetup)
+      .setContexts(GUILD_ONLY)
+      .addStringOption((o) =>
+        o
+          .setName('language')
+          .setDescription(d.standingSetupLanguage)
+          .addChoices(
+            { name: d.standingSetupLanguageEn, value: 'en' },
+            { name: d.standingSetupLanguageHe, value: 'he' },
+          ),
+      ),
+
+    new SlashCommandBuilder()
+      .setName('standing-revert')
+      .setDescription(d.standingRevert)
+      .setContexts(GUILD_ONLY)
+      .addBooleanOption((option) =>
+        option
+          .setName('include-unrecorded')
+          .setDescription(d.standingRevertInclude),
+      ),
+
+    new SlashCommandBuilder()
+      .setName('standing-admin')
+      .setDescription(d.standingAdmin)
+      .setContexts(GUILD_ONLY)
+      .addSubcommand((sub) =>
+        sub.setName('recalculate').setDescription(d.adminRecalculate),
+      )
+      .addSubcommand((sub) =>
+        sub.setName('distribution').setDescription(d.adminDistribution),
+      )
+      .addSubcommand((sub) =>
+        sub
+          .setName('adjust')
+          .setDescription(d.adminAdjust)
+          .addUserOption((o) => o.setName('user').setDescription(d.adminAdjustUser).setRequired(true))
+          .addStringOption((o) =>
+            o
+              .setName('direction')
+              .setDescription(d.adminAdjustDirection)
+              .setRequired(true)
+              .addChoices(
+                { name: d.adminAdjustEase, value: 'ease' },
+                { name: d.adminAdjustPush, value: 'push' },
+                { name: d.adminAdjustUndo, value: 'clear' },
+              ),
+          )
+          .addIntegerOption((o) =>
+            o
+              .setName('reports')
+              .setDescription(d.adminAdjustReports({ def: CREDITS_DEFAULT }))
+              .setMinValue(1)
+              .setMaxValue(50),
+          ),
+      )
+      .addSubcommand((sub) =>
+        sub
+          .setName('remove')
+          .setDescription(d.adminRemove)
+          .addUserOption((o) => o.setName('user').setDescription(d.adminRemoveUser).setRequired(true)),
+      )
+      .addSubcommand((sub) =>
+        sub
+          .setName('reinstate')
+          .setDescription(d.adminReinstate)
+          .addUserOption((o) => o.setName('user').setDescription(d.adminReinstateUser).setRequired(true)),
+      )
+      .addSubcommand((sub) =>
+        sub.setName('pause').setDescription(d.adminPause),
+      )
+      .addSubcommand((sub) =>
+        sub.setName('resume').setDescription(d.adminResume),
+      )
+      .addSubcommand((sub) =>
+        sub.setName('refresh-hub').setDescription(d.adminRefreshHub),
+      )
+      .addSubcommand((sub) =>
+        sub
+          .setName('notice')
+          .setDescription(d.adminNotice)
+          .addStringOption((o) =>
+            o
+              .setName('action')
+              .setDescription(d.adminNoticeAction)
+              .setRequired(true)
+              .addChoices(
+                { name: d.adminNoticeOn, value: 'on' },
+                { name: d.adminNoticeOff, value: 'off' },
+                { name: d.adminNoticeStatus, value: 'status' },
+              ),
+          ),
+      ),
+  ].map((c) => c.toJSON());
+}
+
+/**
+ * Default (English) command definitions, used at startup when guild locale is
+ * not yet known or is English. For other locales, buildCommands(locale) is
+ * called during per-guild registration.
+ */
+export const COMMANDS = buildCommandsFor('en');
+
 
 const MEMBER_COMMANDS = new Set(['rate', 'my-standing', 'challenge', 'participation']);
 
@@ -228,8 +245,16 @@ async function runSetup(interaction: ChatInputCommandInteraction): Promise<void>
   if (!interaction.guild) return;
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
+  // Persist language selection before setup runs, so publishRatingHub and
+  // publishKingMenu pick up the right locale.
+  const rawLang = interaction.options.getString('language');
+  if (rawLang && interaction.guild) {
+    repo.setGuildLocale(interaction.guild.id, rawLang);
+  }
+
   try {
     const report = await setupGuild(interaction.guild);
+    const t = stringsIn(interaction.guild.id);
 
     logAction(interaction.guild, {
       kind: 'admin',
@@ -238,23 +263,22 @@ async function runSetup(interaction: ChatInputCommandInteraction): Promise<void>
     });
 
     const lines = [
-      '**Setup complete.**',
-      report.createdRoles.length > 0 ? `Created roles: ${report.createdRoles.join(', ')}` : null,
-      report.createdChannels.length > 0
-        ? `Created channels: ${report.createdChannels.join(', ')}`
-        : null,
-      report.repaired.length > 0 ? `Reused existing: ${report.repaired.length} item(s)` : null,
-      `Gave a starting role to ${report.membersInitialised} member(s).`,
+      t.setup.done,
+      report.createdRoles.length > 0 ? t.setup.createdRoles({ names: report.createdRoles.join(', ') }) : null,
+      report.createdChannels.length > 0 ? t.setup.createdChannels({ names: report.createdChannels.join(', ') }) : null,
+      report.repaired.length > 0 ? t.setup.reused({ count: report.repaired.length }) : null,
+      t.setup.initialised({ count: report.membersInitialised }),
       '',
-      `Members read the rules and rate each other in <#${report.ratingChannelId}>.`,
-      'Channels that already existed were left exactly as they were — no category moves, no permission changes.',
-      `Make sure my role sits **above** ${TIERS.map((t) => t.roleName).join(', ')} in Server Settings → Roles, or I cannot assign them.`,
+      t.setup.ratingChannel({ channel: report.ratingChannelId }),
+      t.setup.existing,
+      t.setup.roleOrder({ roles: TIERS.map((t2) => t2.roleName).join(', ') }),
     ].filter(Boolean);
 
     await interaction.editReply(lines.join('\n'));
   } catch (error) {
+    const t = stringsIn(interaction.guild.id);
     await interaction.editReply(
-      `Setup failed: ${error instanceof Error ? error.message : String(error)}\n\nCheck that I have Manage Roles and Manage Channels.`,
+      t.setup.error({ message: error instanceof Error ? error.message : String(error) }),
     );
   }
 }
@@ -262,6 +286,8 @@ async function runSetup(interaction: ChatInputCommandInteraction): Promise<void>
 async function runAdmin(interaction: ChatInputCommandInteraction): Promise<void> {
   if (!interaction.guild) return;
   const sub = interaction.options.getSubcommand();
+
+  const t2 = stringsIn(interaction.guild.id);
 
   if (sub === 'recalculate') {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -273,7 +299,7 @@ async function runAdmin(interaction: ChatInputCommandInteraction): Promise<void>
       summary: `recalculated ${count} standing(s)`,
     });
 
-    await interaction.editReply(`Recomputed ${count} standing(s) against the current tuning values.`);
+    await interaction.editReply(t2.admin.recalcDone({ count }));
     return;
   }
 
@@ -286,14 +312,9 @@ async function runAdmin(interaction: ChatInputCommandInteraction): Promise<void>
       counts.set(key, (counts.get(key) ?? 0) + 1);
     }
 
-    const lines = TIERS.map((tier) => `${tier.roleName}: **${counts.get(tier.key) ?? 0}**`);
+    const lines = TIERS.map((tier) => `${tier.roleName}: **${counts.get(tier.key) ?? 0}**`).join('\n');
     await interaction.reply({
-      content: [
-        '**Where the server currently sits**',
-        ...lines,
-        '',
-        'Counts only. There is no command, for anyone, that lists which members are where.',
-      ].join('\n'),
+      content: t2.admin.distribution({ lines }),
       flags: MessageFlags.Ephemeral,
     });
     return;
@@ -322,19 +343,16 @@ async function runNotice(interaction: ChatInputCommandInteraction): Promise<void
   const action = interaction.options.getString('action', true);
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
+  const t = stringsIn(guild.id);
+
   if (action === 'status') {
     const activeAt = repo.getJoinNoticeActiveAt(guild.id);
     const pending = repo.countPendingNotices(guild.id);
 
     await interaction.editReply(
       activeAt
-        ? [
-            `**On** since <t:${Math.floor(activeAt / 1000)}:F>.`,
-            `${pending} member(s) are still to be told, and will be on their next voice join.`,
-            '',
-            'Anyone whose DMs are closed is retried the next day rather than written off, so this number can fall slowly.',
-          ].join('\n')
-        : `**Off.** Nobody is being told. ${pending} member(s) have never received the notice.`,
+        ? t.admin.noticeStatus({ ts: Math.floor(activeAt / 1000), pending })
+        : t.admin.noticeStatusOff({ pending }),
     );
     return;
   }
@@ -346,13 +364,11 @@ async function runNotice(interaction: ChatInputCommandInteraction): Promise<void
       actorId: interaction.user.id,
       summary: 'switched the launch notice off',
     });
-    await interaction.editReply(
-      'Off. Nobody else will be messaged. Everyone already told stays told, so switching it back on will not repeat anyone.',
-    );
+    await interaction.editReply(t.admin.noticeOff);
     return;
   }
 
-  const alreadyKnown = repo.skipNoticeForExistingUsers(guild.id);
+  const skipped = repo.skipNoticeForExistingUsers(guild.id);
   repo.setJoinNoticeActive(guild.id, true);
   const pending = repo.countPendingNotices(guild.id);
 
@@ -362,19 +378,7 @@ async function runNotice(interaction: ChatInputCommandInteraction): Promise<void
     summary: 'switched the launch notice on',
   });
 
-  await interaction.editReply(
-    [
-      '**On.**',
-      `${pending} member(s) will each get one private DM, the first time they join a voice channel from now on.`,
-      alreadyKnown > 0
-        ? `${alreadyKnown} member(s) were skipped because they have already rated someone or already chose to opt out — they know it exists.`
-        : null,
-      '',
-      'Nobody is messaged twice, including across restarts and redeploys. Nobody is messaged for joining the AFK channel, and nobody is messaged while the system is paused.',
-    ]
-      .filter(Boolean)
-      .join('\n'),
-  );
+  await interaction.editReply(t.admin.noticeOn({ pending, skipped }));
 }
 
 /**
@@ -395,11 +399,10 @@ async function runAdjust(interaction: ChatInputCommandInteraction): Promise<void
 
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
+  const t = stringsIn(guild.id);
   const record = repo.ensureMember(guild.id, user.id);
   if (record.participating === 0) {
-    await interaction.editReply(
-      `${user} is outside the standing system, so there is no score to lean on. Reinstate them, or ask them to join, first.`,
-    );
+    await interaction.editReply(t.admin.adjustNotParticipating({ mention: `<@${user.id}>` }));
     return;
   }
 
@@ -407,7 +410,7 @@ async function runAdjust(interaction: ChatInputCommandInteraction): Promise<void
     const undone = await clearAdjustments(guild, user.id, interaction.user.id);
 
     if (undone === 0) {
-      await interaction.editReply(`${user} is not carrying any adjustments.`);
+      await interaction.editReply(t.admin.adjustClearedNone({ mention: `<@${user.id}>` }));
       return;
     }
 
@@ -417,14 +420,12 @@ async function runAdjust(interaction: ChatInputCommandInteraction): Promise<void
       summary: `took back ${undone} adjustment(s) on <@${user.id}>`,
     });
 
-    await interaction.editReply(
-      `Took back ${undone} adjustment(s). ${user} is on the community score alone.`,
-    );
+    await interaction.editReply(t.admin.adjustCleared({ mention: `<@${user.id}>`, count: undone }));
     return;
   }
 
   if (direction !== 'ease' && direction !== 'push') {
-    await interaction.editReply('That is not one of the directions.');
+    await interaction.editReply(t.admin.adjustBadDirection);
     return;
   }
 
@@ -443,21 +444,25 @@ async function runAdjust(interaction: ChatInputCommandInteraction): Promise<void
   });
 
   const { preview } = outcome;
-  const undo =
-    preview.reportsToUndo !== null
-      ? `\n\nIt would take **${preview.reportsToUndo}** fresh report(s) at the top of the scale to put them back where they were — the community can overrule this, it does not have to wait it out.`
-      : '';
-
-  const blocked = preview.blockedBy
-    ? `\n\n**Their area did not move, and will not on this alone:** ${preview.blockedBy}. Adjustments move the score and never the headcount or consensus gates, so pressure cannot place somebody the community has not actually rated. The score is recorded and takes effect once enough real people have weighed in.`
+  const undoStr = preview.reportsToUndo !== null
+    ? t.admin.adjustUndoStr({ count: preview.reportsToUndo })
+    : '';
+  const blockedStr = preview.blockedBy
+    ? t.admin.adjustBlockedStr({ reason: preview.blockedBy })
     : '';
 
   await interaction.editReply(
-    [
-      `${user} is now in **${areaName(outcome.appliedTierIndex)}** at **${preview.projectedScore.toFixed(2)}**, from ${preview.currentScore.toFixed(2)}.${undo}${blocked}`,
-      '',
-      `The adjustment is ${reports} report(s)' worth of signal, not a placement: every real rating still counts, and this fades out over ${CREDITS.LIFETIME_DAYS} days. ${outcome.moved ? 'They have been told their area changed, privately, with no reason given and no mention of who decided it.' : 'Their area did not move, so they were told nothing.'}`,
-    ].join('\n'),
+    t.admin.adjustApplied({
+      mention: `<@${user.id}>`,
+      area: areaName(outcome.appliedTierIndex),
+      score: preview.projectedScore.toFixed(2),
+      from: preview.currentScore.toFixed(2),
+      undo: undoStr,
+      blocked: blockedStr,
+      days: CREDITS.LIFETIME_DAYS,
+      reports,
+      moved: outcome.moved,
+    }),
   );
 }
 
@@ -467,6 +472,7 @@ async function runRemove(interaction: ChatInputCommandInteraction): Promise<void
 
   const user = interaction.options.getUser('user', true);
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  const t = stringsIn(guild.id);
 
   repo.ensureMember(guild.id, user.id);
 
@@ -487,13 +493,7 @@ async function runRemove(interaction: ChatInputCommandInteraction): Promise<void
     summary: `removed <@${user.id}> from the standing system`,
   });
 
-  await interaction.editReply(
-    [
-      `${user} is out of the standing system and cannot rejoin themselves.`,
-      '',
-      'Every rating involving them is suspended rather than deleted, so `/standing-admin reinstate` puts things back as they were.',
-    ].join('\n'),
-  );
+  await interaction.editReply(t.admin.removeDone({ mention: `<@${user.id}>` }));
 
   for (const targetId of affected) {
     recalculateStanding(guild, targetId).catch(() => undefined);
@@ -506,6 +506,7 @@ async function runReinstate(interaction: ChatInputCommandInteraction): Promise<v
 
   const user = interaction.options.getUser('user', true);
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  const t = stringsIn(guild.id);
 
   repo.ensureMember(guild.id, user.id);
   repo.setAdminRemoval(guild.id, user.id, false);
@@ -519,9 +520,7 @@ async function runReinstate(interaction: ChatInputCommandInteraction): Promise<v
 
   // Left opted out on purpose: taking part is the member's choice, so the
   // block is lifted and they decide whether to walk back through the door.
-  await interaction.editReply(
-    `${user} can rejoin again whenever they choose to. They are still outside the system until they press Join, and any suspended ratings resume at that point.`,
-  );
+  await interaction.editReply(t.admin.reinstateDone({ mention: `<@${user.id}>` }));
 }
 
 async function runPause(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -529,6 +528,7 @@ async function runPause(interaction: ChatInputCommandInteraction): Promise<void>
   if (!guild) return;
 
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  const t = stringsIn(guild.id);
   const report = await pauseGuild(guild);
 
   logAction(guild, {
@@ -538,15 +538,10 @@ async function runPause(interaction: ChatInputCommandInteraction): Promise<void>
   });
 
   await interaction.editReply(
-    [
-      '**Paused.**',
-      report.hidden.length > 0 ? `Hidden: ${report.hidden.join(', ')}` : 'Nothing needed hiding.',
-      report.failures.length > 0 ? `Could not hide: ${report.failures.join('; ')}` : null,
-      '',
-      'Every rating, standing and open re-review is untouched, and member commands now say the system is down for maintenance. This channel stays visible so you can run `/standing-admin resume`.',
-    ]
-      .filter(Boolean)
-      .join('\n'),
+    t.admin.pauseDone({
+      hidden: report.hidden.length > 0 ? report.hidden.join(', ') : '',
+      failures: report.failures.length > 0 ? `Could not hide: ${report.failures.join('; ')}` : null,
+    }),
   );
 }
 
@@ -555,6 +550,7 @@ async function runResume(interaction: ChatInputCommandInteraction): Promise<void
   if (!guild) return;
 
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  const t = stringsIn(guild.id);
 
   try {
     const { membersInitialised } = await resumeGuild(guild);
@@ -565,17 +561,10 @@ async function runResume(interaction: ChatInputCommandInteraction): Promise<void
       summary: 'resumed the standing system',
     });
 
-    await interaction.editReply(
-      [
-        '**Back up.**',
-        `Channels are visible again and ${membersInitialised} member(s) have been re-checked against their standing.`,
-        '',
-        'Standings are exactly what they were before the pause. Anything deleted during the downtime was rebuilt, and the pinned explanation was reposted.',
-      ].join('\n'),
-    );
+    await interaction.editReply(t.admin.resumeDone({ count: membersInitialised }));
   } catch (error) {
     await interaction.editReply(
-      `Could not resume: ${error instanceof Error ? error.message : String(error)}`,
+      t.admin.resumeError({ error: error instanceof Error ? error.message : String(error) }),
     );
   }
 }
@@ -585,6 +574,7 @@ async function runRefreshHub(interaction: ChatInputCommandInteraction): Promise<
   if (!guild) return;
 
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  const t = stringsIn(guild.id);
 
   const settings = repo.getGuildSettings(guild.id);
   const channel = settings?.rating_channel_id
@@ -592,10 +582,10 @@ async function runRefreshHub(interaction: ChatInputCommandInteraction): Promise<
     : null;
 
   if (!channel?.isTextBased()) {
-    await interaction.editReply('I could not find the public channel. Run `/standing-setup` instead.');
+    await interaction.editReply(t.admin.refreshHubMissing);
     return;
   }
 
   await publishRatingHub(channel as TextChannel);
-  await interaction.editReply(`Reposted the explanation and buttons in <#${channel.id}>.`);
+  await interaction.editReply(t.admin.refreshHubDone({ channel: channel.id }));
 }

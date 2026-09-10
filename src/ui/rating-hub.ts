@@ -5,7 +5,8 @@ import {
   EmbedBuilder,
   type BaseMessageOptions,
 } from 'discord.js';
-import { COPY, LIMITS, SCORING, SERVER_LAYOUT, TIERS } from '../config.js';
+import { LIMITS, SCORING, SERVER_LAYOUT, TIERS } from '../config.js';
+import { stringsIn } from '../i18n/index.js';
 import { NS, encodeId } from '../lib/custom-ids.js';
 
 /**
@@ -17,111 +18,91 @@ import { NS, encodeId } from '../lib/custom-ids.js';
  * areas of the server, never as labels for people, and the privacy guarantees
  * are stated plainly because they are the reason the system is safe to use.
  */
-export function buildRatingHubMessage(): BaseMessageOptions {
+export function buildRatingHubMessage(guildId: string): BaseMessageOptions {
+  const t = stringsIn(guildId);
   const firstTier = TIERS[0];
 
   const areaLines = TIERS.map((tier, index) => {
     const canSee = TIERS.slice(index)
-      .map((t) => t.roleName)
+      .map((tier2) => tier2.roleName)
       .join(' + ');
-    return `**${tier.roleName}** — sees ${canSee}`;
+    return t.hub.areasArea({ name: tier.roleName, canSee });
   }).join('\n');
 
   const roomLines = (firstTier?.channels ?? [])
     .map((spec) => {
       const count = spec.count ?? 1;
-      const copies = count > 1 ? `${count} × ` : '';
-      if (spec.kind === 'text') return `${copies}text channel`;
-      const cap = spec.userLimit ? `up to ${spec.userLimit}` : 'no limit';
-      return `${copies}voice \`${spec.name}\` (${cap})`;
+      if (spec.kind === 'text') return t.hub.roomText({ count });
+      const cap = spec.userLimit
+        ? t.hub.roomCapUp({ n: spec.userLimit })
+        : t.hub.roomCapNone;
+      return t.hub.roomVoice({ name: spec.name, cap, count });
     })
     .join(' · ');
 
-  const scaleLines = COPY.ratingScale
+  const scaleLines = t.scale
     .map((step) => `**${step.value}** · ${step.label} — ${step.description}`)
     .join('\n');
 
   const embed = new EmbedBuilder()
-    .setTitle(COPY.systemName)
+    .setTitle(t.systemName)
     .setColor(firstTier?.color ?? 0x57f287)
-    .setDescription(
-      [
-        'This server has a set of social areas sorted by how people experience playing together. Which area you can see is decided by your teammates, not by a moderator — the idea is simply that everyone gets to play with people they enjoy playing with.',
-        '',
-        `**Everyone starts in ${firstTier?.roleName ?? 'the first area'}, with a clean slate.**`,
-      ].join('\n'),
-    )
+    .setDescription(t.hub.description({ firstArea: firstTier?.roleName ?? 'the first area' }))
     .addFields(
       {
-        name: '① The areas',
+        name: t.hub.areasTitle,
         value: [
           areaLines,
           '',
-          'Each area has its own channels: ' + roomLines + '.',
-          'Being in a cleaner area means you can see *more* of the server, not less. Every channel that existed before this system was added is unaffected and stays open to everyone as it always was.',
+          t.hub.areasChannels({ roomLines }),
+          t.hub.areasNote,
         ].join('\n'),
       },
       {
-        name: '② How you rate someone',
+        name: t.hub.ratingTitle,
         value: [
-          'Press **Rate a player** below. Pick a player, choose a number, and you will be asked whether you want to rate someone else. That is the whole thing.',
+          t.hub.ratingInstructions,
           '',
           scaleLines,
         ].join('\n'),
       },
       {
-        name: '③ What your rating does',
-        value: [
-          '• **One rating per person, per player.** You can change your rating later, but you can never stack a second one on top.',
-          '• **Ratings from people in good standing count for more.** A group in poor standing cannot gang up on someone.',
-          '• **One rating barely moves anyone.** Neither do two. Moving between areas takes a real group of people who broadly agree.',
-          `• **Ratings expire by themselves after ${SCORING.VOTE_LIFETIME_DAYS} days.** Nothing you do follows you around forever, and nobody has to forgive you for it — it just lapses.`,
-          '• **Brand new accounts count for very little**, so nobody can swing a result with throwaway alts.',
-        ].join('\n'),
+        name: t.hub.effectTitle,
+        value: t.hub.effectPoints
+          .map((p) => (typeof p === 'function' ? p({ days: SCORING.VOTE_LIFETIME_DAYS }) : p))
+          .join('\n'),
       },
       {
-        name: '④ Your privacy — read this part',
-        value: [
-          '• **Everything you do here is visible only to you.** The player picker, the rating, the confirmation: all of it is private, and none of it appears in this channel.',
-          '• **You are never told who rated you**, and neither is anyone else. There is no command, for members or for staff, that shows another person\'s standing or who rated whom.',
-          '• **No announcements.** If your area changes, the only message sent is a private one to you.',
-          '• **No labels.** The roles are named after colours. There is no "toxic" role, they are hidden from the member list, and they cannot be pinged.',
-        ].join('\n'),
+        name: t.hub.privacyTitle,
+        value: t.hub.privacyPoints.join('\n'),
       },
       {
-        name: '⑤ If you think a rating is unfair',
-        value: [
-          `Press **Ask for a re-review**, at most once every ${LIMITS.CHALLENGE_COOLDOWN_DAYS} days. It sends a short request to the ${SERVER_LAYOUT.kingRoleName} role asking them to look at your value.`,
-          `**Nobody who rated you is contacted**, and nobody is told you asked. The ${SERVER_LAYOUT.kingRoleName} role may adjust your value or leave it alone, and you will not get a reply either way — if it is accepted, you will simply see your area change within a day.`,
-        ].join('\n'),
+        name: t.hub.reviewTitle,
+        value: t.hub.reviewBody({ days: LIMITS.CHALLENGE_COOLDOWN_DAYS, king: SERVER_LAYOUT.kingRoleName }),
       },
       {
-        name: '⑥ Opting out',
-        value: [
-          'Press **Participation** to leave the system entirely. Every rating involving you stops counting, you have no standing, nobody can rate you, and you cannot rate anyone. You keep access to all the channels that existed before this system, and you can rejoin whenever you like.',
-          '',
-          `Leaving is not a shortcut to a clean slate: if you rejoin, ratings that have not yet aged out resume. They expire ${SCORING.VOTE_LIFETIME_DAYS} days after they were given either way, so time clears your record — for everyone, on the same terms.`,
-        ].join('\n'),
+        name: t.hub.optOutTitle,
+        value: t.hub.optOutBody({ days: SCORING.VOTE_LIFETIME_DAYS }),
       },
     )
-    .setFooter({ text: 'Nothing you press here is visible to anyone else in this server.' });
+    .setFooter({ text: t.hub.footer });
 
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
       .setCustomId(encodeId(NS.RATE, 'start'))
-      .setLabel('Rate a player')
+      .setLabel(t.hub.btnRate)
       .setStyle(ButtonStyle.Primary),
     new ButtonBuilder()
       .setCustomId(encodeId(NS.RATE, 'mine'))
-      .setLabel('My standing')
+      .setLabel(t.hub.btnMyStanding)
       .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId(encodeId(NS.CHALLENGE, 'open'))
-      .setLabel('Ask for a re-review')
+      .setLabel(t.hub.btnReview)
       .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId(encodeId(NS.PARTICIPATION, 'menu'))
-      .setLabel('Participation')
+      .setLabel(t.hub.btnParticipation)
       .setStyle(ButtonStyle.Secondary),
   );
 

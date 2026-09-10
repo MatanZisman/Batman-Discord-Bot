@@ -1,6 +1,7 @@
 import { type Guild, type TextChannel } from 'discord.js';
 import { LOGGING, tierAt, tierIndexByKey } from '../config.js';
 import * as repo from '../db/repo.js';
+import { stringsIn } from '../i18n/index.js';
 import { logger } from '../lib/logger.js';
 
 /**
@@ -47,7 +48,7 @@ export function logAction(guild: Guild, action: LoggedAction): void {
   if (!LOGGING.enabled) return;
   if (action.kind === 'tier_change' && !LOGGING.includeTierChanges) return;
 
-  const line = format(action);
+  const line = format(guild.id, action);
   if (!line) return;
 
   const batch = batches.get(guild.id) ?? { guild, lines: [], timer: null };
@@ -62,43 +63,44 @@ export function logAction(guild: Guild, action: LoggedAction): void {
   batches.set(guild.id, batch);
 }
 
-function format(action: LoggedAction): string | null {
+function format(guildId: string, action: LoggedAction): string | null {
+  const t = stringsIn(guildId);
   const full = LOGGING.detail === 'full';
 
   switch (action.kind) {
     case 'rating_created':
       return full
-        ? `<@${action.actorId}> rated <@${action.targetId}> **${action.value}**`
-        : `<@${action.actorId}> submitted a rating`;
+        ? t.log.ratingCreatedFull({ actor: `<@${action.actorId}>`, target: `<@${action.targetId}>`, value: action.value })
+        : t.log.ratingCreatedRedacted({ actor: `<@${action.actorId}>` });
 
     case 'rating_updated':
       return full
-        ? `<@${action.actorId}> changed their rating of <@${action.targetId}> to **${action.value}**`
-        : `<@${action.actorId}> changed a rating they had given`;
+        ? t.log.ratingUpdatedFull({ actor: `<@${action.actorId}>`, target: `<@${action.targetId}>`, value: action.value })
+        : t.log.ratingUpdatedRedacted({ actor: `<@${action.actorId}>` });
 
     case 'opt_in':
-      return `<@${action.actorId}> joined the standing system; suspended ratings resumed`;
+      return t.log.optIn({ actor: `<@${action.actorId}>` });
 
     case 'opt_out':
-      return `<@${action.actorId}> left the standing system; ratings involving them are suspended`;
+      return t.log.optOut({ actor: `<@${action.actorId}>` });
 
     case 'challenge_opened':
-      return `<@${action.actorId}> opened a re-review, ${action.invited} rater(s) asked`;
+      return t.log.challengeOpened({ actor: `<@${action.actorId}>`, invited: action.invited });
 
     case 'challenge_rerated':
-      return `<@${action.actorId}> re-rated a player during a re-review`;
+      return t.log.challengeRerated({ actor: `<@${action.actorId}>` });
 
     case 'challenge_kept':
-      return `<@${action.actorId}> kept their existing rating during a re-review`;
+      return t.log.challengeKept({ actor: `<@${action.actorId}>` });
 
     case 'tier_change': {
       const to = tierAt(tierIndexByKey(action.toTierKey)).roleName;
       const from = action.fromTierKey ? tierAt(tierIndexByKey(action.fromTierKey)).roleName : 'none';
-      return `<@${action.subjectId}> moved **${from} → ${to}**`;
+      return t.log.tierChange({ subject: `<@${action.subjectId}>`, from, to });
     }
 
     case 'admin':
-      return `<@${action.actorId}> ${action.summary}`;
+      return t.log.admin({ actor: `<@${action.actorId}>`, summary: action.summary });
 
     default:
       return null;

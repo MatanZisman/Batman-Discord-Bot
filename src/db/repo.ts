@@ -15,6 +15,8 @@ export interface GuildSettings {
   setup_at: number | null;
   /** Non-null while the system is paused for maintenance. */
   paused_at?: number | null;
+  /** Language locale for all bot messages ('en' | 'he'). Defaults to 'en'. */
+  locale?: string | null;
 }
 
 export interface TierRole {
@@ -162,6 +164,21 @@ export function isGuildPaused(guildId: string): boolean {
     .prepare<[string], { paused_at: number | null }>('SELECT paused_at FROM guilds WHERE guild_id = ?')
     .get(guildId);
   return Boolean(row?.paused_at);
+}
+
+/** Returns the stored locale for this guild, or null when not set. */
+export function getGuildLocale(guildId: string): string | null {
+  const row = getDatabase()
+    .prepare<[string], { locale: string | null }>('SELECT locale FROM guilds WHERE guild_id = ?')
+    .get(guildId);
+  return row?.locale ?? null;
+}
+
+/** Persists the locale for this guild. */
+export function setGuildLocale(guildId: string, locale: string): void {
+  getDatabase()
+    .prepare('UPDATE guilds SET locale = ? WHERE guild_id = ?')
+    .run(locale, guildId);
 }
 
 /* -------------------------------------------------------------------------- */

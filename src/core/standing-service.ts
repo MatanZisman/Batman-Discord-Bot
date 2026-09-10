@@ -1,6 +1,7 @@
 import { type Guild, type GuildMember } from 'discord.js';
 import { DEFAULT_TIER_INDEX, SCORING, tierAt, tierIndexByKey } from '../config.js';
 import * as repo from '../db/repo.js';
+import { stringsIn } from '../i18n/index.js';
 import { logger } from '../lib/logger.js';
 import { logAction } from './action-log.js';
 import {
@@ -176,7 +177,7 @@ export async function recalculateStanding(
     // actually changed.
     const initialising = isInitialisation(previousTierIndex, standing.tierIndex);
     if (options.notifyUser !== false && member && !initialising) {
-      await notifyTierChange(member, standing.tierIndex, previousTierIndex, standing.tierIndex > 0);
+      await notifyTierChange(guild.id, member, standing.tierIndex, previousTierIndex, standing.tierIndex > 0);
     }
   }
 
@@ -244,31 +245,31 @@ export async function applyTierRoles(
 }
 
 async function notifyTierChange(
+  guildId: string,
   member: GuildMember,
   tierIndex: number,
   previousTierIndex: number | null,
   canChallenge: boolean,
 ): Promise<void> {
+  const t = stringsIn(guildId);
   const now = tierAt(tierIndex);
   const before = previousTierIndex === null ? null : tierAt(previousTierIndex);
   const improved = previousTierIndex !== null && tierIndex < previousTierIndex;
 
   const headline = improved
-    ? `Your community standing moved up to **${now.roleName}**.`
-    : `Your community standing is now **${now.roleName}**.`;
+    ? t.dm.tierImproved({ area: now.roleName })
+    : t.dm.tierChanged({ area: now.roleName });
 
   const body = [
     headline,
-    before ? `Previously: ${before.roleName}` : null,
+    before ? t.dm.tierPreviously({ area: before.roleName }) : null,
     '',
-    'This is private, and ratings expire on their own over time.',
+    t.dm.tierPrivate,
     // Says "the moderators", not "your raters": a review request goes to the
     // KING role and contacts nobody else. The earlier design did DM every past
     // rater, and this line outlived it — promising a member something the bot
     // no longer does, two lines under a privacy guarantee.
-    canChallenge
-      ? 'If you think this is wrong, run `/challenge` in the server to ask the moderators to take another look. Nobody who rated you is contacted, and nobody is told you asked.'
-      : null,
+    canChallenge ? t.dm.tierChallenge : null,
   ]
     .filter(Boolean)
     .join('\n');

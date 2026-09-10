@@ -341,17 +341,62 @@ This is the one place where two requirements genuinely collide. "Log every actio
 
 `LOGGING.includeTierChanges` is separate, and covers the automatic placements. Those are not member actions, but they are usually what a KING actually wants to see. Turning it off tightens things further: standings then only ever appear in challenge reports.
 
+## Hebrew / RTL mode
+
+Every server can run the bot in either English (default) or Hebrew. All player-facing messages, moderator UI, DMs, log lines and slash command descriptions follow the setting.
+
+### Switching language
+
+**Via `/standing-setup`** — pass the `language` option with the desired locale code:
+
+```
+/standing-setup language:he
+```
+
+**Via the KING panel** — press the **🌐 Language** button in the bottom row of the control panel. A dropdown appears with the available languages. Picking one saves the setting, republishes the rating hub and the KING panel in the new language, and re-registers the guild's slash commands with translated descriptions.
+
+### What changes
+
+| Surface | Translated |
+| --- | --- |
+| Rating hub (pinned public explanation and buttons) | ✓ |
+| KING control panel and all buttons | ✓ |
+| All ephemeral replies (errors, confirmations, pickers) | ✓ |
+| DMs to members (tier changes, join notice, arrival) | ✓ |
+| Action log lines | ✓ |
+| Slash command descriptions and choice labels | ✓ |
+
+### How Hebrew works in Discord
+
+Discord renders Unicode text using the browser's bidi algorithm: a Hebrew string flips right-to-left automatically. Emoji and numbers inside a Hebrew sentence would snap to the wrong end without help, so the `src/i18n/bidi.ts` helpers wrap LTR tokens — Discord mentions, numbers, inline code — in Unicode directional marks that keep them in their intended position.
+
+### Adding a locale
+
+1. Add the locale tag to `LOCALES` in `src/i18n/locale.ts`.
+2. Add the human-readable name to `LOCALE_LABELS`.
+3. Create `src/i18n/<tag>.ts` — a catalog object that satisfies the `Strings` type exported from `src/i18n/en.ts`.
+4. Import it and register it in `src/i18n/index.ts`.
+
+`tsc --noEmit` will report every missing or mistyped key immediately.
+
 ## Layout
 
 ```
 src/
-  config.ts                 every tunable number and every player-visible string
+  config.ts                 every tunable number
   index.ts                  client bootstrap, gateway events, command registration
-  commands.ts               slash command definitions + dispatch
+  commands.ts               slash command definitions + dispatch (locale-aware)
   interactions.ts           one router for all buttons and select menus
+  i18n/
+    locale.ts               LOCALES, Locale type, LOCALE_LABELS, isLocale, isRtl
+    bidi.ts                 Unicode directional helpers: ltr(), rtlLine(), truncateBidi()
+    en.ts                   English catalog + Strings type
+    he.ts                   Hebrew catalog satisfies Strings
+    index.ts                stringsFor(locale) / stringsIn(guildId) entry points
+    i18n.test.ts            catalog parity, DB round-trip, bidi helpers
   core/
     scoring.ts              pure scoring engine — no DB, no Discord, no clock
-    scoring.test.ts         37 tests pinning the behaviour above
+    scoring.test.ts         38 tests pinning the behaviour above
     standing-service.ts     scoring ↔ Discord: recalculate, assign roles, DM
     guild-setup.ts          roles, categories, the visibility cascade
     guild-teardown.ts       the inverse, driven by recorded provenance
@@ -364,6 +409,7 @@ src/
     join-notice.ts          the one-time "this exists" DM: arrival + first voice
     notifications.test.ts   what counts as news worth DMing a member about
     maintenance.ts          pause/resume: hide the surface, keep all the data
+    language.ts             applyLanguage(): store locale + republish + re-register
   handlers/                 interaction handlers (rating, challenge, participation)
     guards.ts               the KING role + KING channel gate on admin commands
   ui/                       message builders, kept separate from logic

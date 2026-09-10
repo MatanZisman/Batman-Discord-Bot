@@ -8,6 +8,7 @@ import {
 } from 'discord.js';
 import { SERVER_LAYOUT } from '../config.js';
 import * as repo from '../db/repo.js';
+import { stringsIn } from '../i18n/index.js';
 
 type AnyGuildInteraction =
   | ChatInputCommandInteraction
@@ -53,13 +54,16 @@ function hasManageGuild(interaction: AnyGuildInteraction): boolean {
  */
 export function checkAdminAccess(interaction: AnyGuildInteraction): GuardResult {
   if (!interaction.guildId) {
-    return { ok: false, message: 'That only works inside a server.' };
+    const t = stringsIn('');
+    return { ok: false, message: t.guards.guildOnly };
   }
+
+  const t = stringsIn(interaction.guildId);
 
   if (!hasKingRole(interaction) && !hasManageGuild(interaction)) {
     return {
       ok: false,
-      message: `Only the ${SERVER_LAYOUT.kingRoleName} role can do that. (Members with Manage Server can too, so the role can always be handed out again.)`,
+      message: t.guards.kingOnly({ king: SERVER_LAYOUT.kingRoleName }),
     };
   }
 
@@ -69,10 +73,10 @@ export function checkAdminAccess(interaction: AnyGuildInteraction): GuardResult 
   );
 
   if (allowed.length > 0 && !allowed.includes(interaction.channelId ?? '')) {
-    const preferred = settings?.king_menu_channel_id ?? settings?.king_channel_id;
+    const preferred = settings?.king_menu_channel_id ?? settings?.king_channel_id ?? '';
     return {
       ok: false,
-      message: `Administration happens in <#${preferred}>, out of sight of the members. Run this there instead — most of it is buttons on the pinned panel, so you rarely need the commands at all.`,
+      message: t.guards.wrongAdminChannel({ channel: preferred }),
     };
   }
 

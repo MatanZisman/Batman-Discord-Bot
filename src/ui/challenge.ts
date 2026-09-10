@@ -9,6 +9,8 @@ import {
 } from 'discord.js';
 import { CREDITS, TIERS, tierAt } from '../config.js';
 import type { AdjustmentPreview } from '../core/adjustments.js';
+import { stringsIn } from '../i18n/index.js';
+import { truncateBidi } from '../i18n/bidi.js';
 import { NS, encodeId } from '../lib/custom-ids.js';
 
 /**
@@ -32,6 +34,8 @@ export interface KingRequestInput {
   /** Each offered size, already priced against this member's real votes. */
   options: AdjustmentPreview[];
   deadline: number | null;
+  /** Guild id for locale lookup. */
+  guildId?: string;
 }
 
 /**
@@ -43,50 +47,42 @@ export interface KingRequestInput {
  * worth making twice, so the whole thing is a single interaction.
  */
 export function buildKingRequest(input: KingRequestInput): BaseMessageOptions {
+  const t = stringsIn(input.guildId ?? '');
+
   const embed = new EmbedBuilder()
-    .setTitle('A player has asked for a review')
+    .setTitle(t.review.kingTitle)
     .setColor(tierAt(0).color)
-    .setDescription(
-      [
-        `<@${input.playerId}> would like their rating looked at.`,
-        '',
-        'Ease off if you think the community has been harsh, push down if you think it has been generous, or dismiss it. Nobody who rated them has been contacted, and they have not been promised an answer.',
-      ].join('\n'),
-    )
+    .setDescription(t.review.kingDesc({ mention: `<@${input.playerId}>` }))
     .addFields(
       {
-        name: 'Where they are',
+        name: t.review.kingWhereTitle,
         value: [
-          `Area: **${labelFor(input.tierKey)}**`,
-          `Score: **${input.score !== null ? input.score.toFixed(2) : 'not yet scored'}**`,
-          `From **${input.raterCount}** rater(s)`,
+          t.review.kingWhereArea({ area: labelFor(input.tierKey) }),
+          input.score !== null
+            ? t.review.kingWhereScore({ score: input.score.toFixed(2) })
+            : t.review.kingWhereUnscored,
+          t.review.kingWhereRaters({ count: input.raterCount }),
         ].join('\n'),
         inline: true,
       },
       {
-        name: 'What an adjustment does',
-        value: [
-          'Adds that many reports of signal, for or against.',
-          'The score keeps running underneath.',
-          `Fades out over ${CREDITS.LIFETIME_DAYS} days.`,
-        ].join('\n'),
+        name: t.review.kingAdjTitle,
+        value: t.review.kingAdjBody({ days: CREDITS.LIFETIME_DAYS }),
         inline: true,
       },
     )
-    .setFooter({
-      text: 'Individual raters are never shown, by design. Doing nothing is a valid answer.',
-    });
+    .setFooter({ text: t.review.kingFooter });
 
   if (input.liveAdjustments.length > 0) {
     embed.addFields({
-      name: 'Already adjusted',
+      name: t.review.kingAlreadyAdjTitle,
       value: input.liveAdjustments.join('\n'),
     });
   }
 
   if (input.deadline) {
     embed.addFields({
-      name: 'Closes itself',
+      name: t.review.kingClosesTitle,
       value: `<t:${Math.floor(input.deadline / 1000)}:R>`,
     });
   }
@@ -100,8 +96,8 @@ export function buildKingRequest(input: KingRequestInput): BaseMessageOptions {
       new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
         new StringSelectMenuBuilder()
           .setCustomId(encodeId(NS.KING, 'adjust', input.challengeId))
-          .setPlaceholder('Adjust their score')
-          .addOptions(buildAdjustmentOptions(input.options)),
+          .setPlaceholder(t.review.kingAdjustPlaceholder)
+          .addOptions(buildAdjustmentOptions(input.options, input.guildId)),
       ),
     );
   }
@@ -109,7 +105,7 @@ export function buildKingRequest(input: KingRequestInput): BaseMessageOptions {
   const buttons = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
       .setCustomId(encodeId(NS.KING, 'dismiss', input.challengeId))
-      .setLabel('Dismiss, no change')
+      .setLabel(t.review.kingDismissBtn)
       .setStyle(ButtonStyle.Secondary),
   );
 
@@ -117,7 +113,7 @@ export function buildKingRequest(input: KingRequestInput): BaseMessageOptions {
     buttons.addComponents(
       new ButtonBuilder()
         .setCustomId(encodeId(NS.KING, 'clear', input.challengeId))
-        .setLabel('Take back existing adjustments')
+        .setLabel(t.review.kingClearBtn)
         .setStyle(ButtonStyle.Secondary),
     );
   }
@@ -138,31 +134,34 @@ export function buildKingRequest(input: KingRequestInput): BaseMessageOptions {
  */
 export function buildAdjustmentOptions(
   previews: AdjustmentPreview[],
+  guildId?: string,
 ): StringSelectMenuOptionBuilder[] {
+  const t = stringsIn(guildId ?? '');
+
   return previews.map((preview) => {
-    const verb = preview.direction === 'ease' ? 'Ease off' : 'Push down';
+    const verb = preview.direction === 'ease' ? t.review.adjVerbEase : t.review.adjVerbPush;
     const area = tierAt(preview.projectedTierIndex).roleName;
 
     const moved = preview.projectedTierIndex !== preview.currentTierIndex;
     const landing = moved
-      ? `→ ${area} at ${preview.projectedScore.toFixed(2)}`
-      : `stays ${area}, ${preview.projectedScore.toFixed(2)}`;
+      ? t.review.adjLandingMoved({ area, score: preview.projectedScore.toFixed(2) })
+      : t.review.adjLandingStays({ area, score: preview.projectedScore.toFixed(2) });
 
     // Order matters: a blocked push is the one outcome a moderator will
     // otherwise read as a broken button, so it takes precedence over the
     // cost note.
     const note = preview.blockedBy
-      ? ` · no move: ${preview.blockedBy}`
+      ? t.review.adjNoteBlocked({ reason: preview.blockedBy })
       : preview.reportsToUndo !== null
-        ? ` · ${preview.reportsToUndo} report(s) to undo`
+        ? t.review.adjNoteUndo({ count: preview.reportsToUndo })
         : preview.direction === 'ease' && moved
-          ? ' · out of reach by reports alone'
+          ? t.review.adjNoteEaseMoved
           : '';
 
     return new StringSelectMenuOptionBuilder()
       .setValue(`${preview.direction}:${preview.reports}`)
-      .setLabel(`${verb} — ${preview.reports} report(s)' worth`)
-      .setDescription(`${landing}${note}`.slice(0, 100));
+      .setLabel(t.review.adjLabel({ verb, reports: preview.reports }))
+      .setDescription(truncateBidi(`${landing}${note}`, 100));
   });
 }
 

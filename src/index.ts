@@ -9,7 +9,7 @@ import {
   Routes,
   type GuildMember,
 } from 'discord.js';
-import { COMMANDS } from './commands.js';
+import { buildCommands, COMMANDS } from './commands.js';
 import { flushAllLogs } from './core/action-log.js';
 import {
   isFreshVoiceJoin,
@@ -125,12 +125,15 @@ async function registerCommands(botToken: string, appId: string, guildIds: strin
 
   const targets = configured.length > 0 ? configured : guildIds;
   const rest = new REST({ version: '10' }).setToken(botToken);
-
-  const body = JSON.stringify(COMMANDS);
-  const fingerprint = createHash('sha256').update(body).digest('hex').slice(0, 16);
   const force = process.env.FORCE_COMMAND_REGISTRATION === 'true';
 
   for (const guildId of targets) {
+    // Use the locale stored for this guild so descriptions match the language
+    // the server operator chose via /standing-setup or the language button.
+    const locale = (repo.getGuildLocale(guildId) ?? 'en') as import('./i18n/locale.js').Locale;
+    const commands = buildCommands(locale);
+    const body = JSON.stringify(commands);
+    const fingerprint = createHash('sha256').update(body).digest('hex').slice(0, 16);
     const key = `commands:${appId}:${guildId}`;
 
     if (!force && repo.getState(key) === fingerprint) {
@@ -139,9 +142,9 @@ async function registerCommands(botToken: string, appId: string, guildIds: strin
     }
 
     try {
-      await rest.put(Routes.applicationGuildCommands(appId, guildId), { body: COMMANDS });
+      await rest.put(Routes.applicationGuildCommands(appId, guildId), { body: commands });
       repo.setState(key, fingerprint);
-      logger.info(`Registered ${COMMANDS.length} commands in guild ${guildId}`);
+      logger.info(`Registered ${commands.length} commands in guild ${guildId}`);
     } catch (error) {
       logger.warn(`Could not register commands in guild ${guildId}`, error);
     }

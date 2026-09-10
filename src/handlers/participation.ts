@@ -3,6 +3,7 @@ import { DAY_MS, SCORING, SERVER_LAYOUT, TIERS, tierAt } from '../config.js';
 import { logAction } from '../core/action-log.js';
 import * as repo from '../db/repo.js';
 import { applyTierRoles, recalculateStanding } from '../core/standing-service.js';
+import { stringsIn } from '../i18n/index.js';
 import { logger } from '../lib/logger.js';
 import { respondPrivately } from '../lib/respond.js';
 import {
@@ -20,11 +21,11 @@ export async function showParticipationMenu(
 
   // respondPrivately, not update(): the Participation button lives on the
   // shared pinned hub, and editing that in place rewrites it for everyone.
-  await respondPrivately(interaction, buildParticipationStatus(record.participating === 1));
+  await respondPrivately(interaction, buildParticipationStatus(record.participating === 1, guild?.id));
 }
 
 export async function showLeaveConfirmation(interaction: ButtonInteraction): Promise<void> {
-  await respondPrivately(interaction, buildLeaveConfirmation());
+  await respondPrivately(interaction, buildLeaveConfirmation(interaction.guild?.id));
 }
 
 export async function handleLeave(interaction: ButtonInteraction): Promise<void> {
@@ -44,14 +45,9 @@ export async function handleLeave(interaction: ButtonInteraction): Promise<void>
   const member = await guild.members.fetch(userId).catch(() => null);
   if (member) await applyTierRoles(guild, member, null);
 
+  const t = stringsIn(guild.id);
   await respondPrivately(interaction, {
-    content: [
-      'Done. You are now outside the standing system.',
-      '',
-      `Every rating involving you has stopped counting, and you have no standing. Nobody can rate you and you cannot rate anyone. You keep access to the open channels and can rejoin at any time.`,
-      '',
-      `If you come back, any ratings that have not yet aged out will pick up where they left off. They expire on their own ${SCORING.VOTE_LIFETIME_DAYS} days after they were given, whether you are in the system or not — so staying out that long does clear them, the same way it would for anyone else.`,
-    ].join('\n'),
+    content: t.participation.leftMsg({ days: SCORING.VOTE_LIFETIME_DAYS }),
     components: [],
   });
 
@@ -69,11 +65,13 @@ export async function handleJoin(interaction: ButtonInteraction): Promise<void> 
   const userId = interaction.user.id;
   const record = repo.ensureMember(guild.id, userId);
 
+  const t = stringsIn(guild.id);
+
   // Someone an admin removed cannot let themselves back in, or the removal
   // would mean nothing.
   if (record.removed_by_admin === 1) {
     await respondPrivately(interaction, {
-      content: `You were removed from the standing system by a moderator, so you cannot rejoin on your own. Speak to the ${SERVER_LAYOUT.kingRoleName} role if you think that should change.`,
+      content: t.participation.removedByAdmin({ king: SERVER_LAYOUT.kingRoleName }),
       components: [],
     });
     return;
@@ -94,11 +92,7 @@ export async function handleJoin(interaction: ButtonInteraction): Promise<void> 
     : (TIERS[0]?.roleName ?? 'the first tier');
 
   await respondPrivately(interaction, {
-    content: [
-      `You are back in, in **${tierName}**.`,
-      '',
-      'You can now rate other players, and other players can rate you. You can leave again at any time.',
-    ].join('\n'),
+    content: t.participation.joinedMsg({ area: tierName }),
     components: [],
   });
 
