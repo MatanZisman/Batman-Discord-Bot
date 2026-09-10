@@ -390,7 +390,7 @@ async function doLanguagePicker(interaction: ButtonInteraction): Promise<void> {
   const t = stringsIn(interaction.guild!.id);
 
   const select = new StringSelectMenuBuilder()
-    .setCustomId(encodeId(NS.KING, 'language-pick'))
+    .setCustomId(encodeId(NS.MENU, 'language-pick'))
     .setPlaceholder(t.admin.languageBtn)
     .addOptions(
       Object.entries(LOCALE_LABELS).map(([value, label]) =>
