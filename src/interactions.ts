@@ -37,6 +37,15 @@ export async function routeInteraction(interaction: Interaction): Promise<void> 
       return;
     }
 
+    if (interaction.isModalSubmit()) {
+      const id = decodeId(interaction.customId);
+      if (!id) return;
+      if (id.ns === NS.MENU) {
+        await routeKingMenu(interaction, id.action);
+      }
+      return;
+    }
+
     if (interaction.isButton() || interaction.isStringSelectMenu() || interaction.isUserSelectMenu()) {
       const id = decodeId(interaction.customId);
       if (!id) return;

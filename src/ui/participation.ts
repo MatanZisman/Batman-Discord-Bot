@@ -4,7 +4,7 @@ import {
   ButtonStyle,
   type BaseMessageOptions,
 } from 'discord.js';
-import { SCORING, TIERS } from '../config.js';
+import { TIERS } from '../config.js';
 import { stringsIn } from '../i18n/index.js';
 import { NS, encodeId } from '../lib/custom-ids.js';
 
@@ -46,7 +46,7 @@ export function buildLeaveConfirmation(guildId?: string): BaseMessageOptions {
     content: [
       t.participation.confirmLeaveTitle,
       '',
-      t.participation.confirmLeaveBody({ days: SCORING.VOTE_LIFETIME_DAYS }),
+      t.participation.confirmLeaveBody,
     ].join('\n'),
     components: [
       new ActionRowBuilder<ButtonBuilder>().addComponents(

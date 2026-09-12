@@ -1,14 +1,18 @@
 import {
   ActionRowBuilder,
   MessageFlags,
+  ModalBuilder,
   StringSelectMenuBuilder,
   StringSelectMenuOptionBuilder,
+  TextInputBuilder,
+  TextInputStyle,
   type ButtonInteraction,
+  type ModalSubmitInteraction,
   type StringSelectMenuInteraction,
   type TextChannel,
   type UserSelectMenuInteraction,
 } from 'discord.js';
-import { NS, encodeId } from '../lib/custom-ids.js';
+import { NS, decodeId, encodeId } from '../lib/custom-ids.js';
 import { CREDITS, tierIndexByKey } from '../config.js';
 import { logAction } from '../core/action-log.js';
 import {
@@ -31,7 +35,11 @@ import { respondPrivately } from '../lib/respond.js';
 import { buildAdjustmentPicker, buildMemberPicker } from '../ui/king-menu.js';
 import { checkAdminAccess } from './guards.js';
 
-type MenuInteraction = ButtonInteraction | StringSelectMenuInteraction | UserSelectMenuInteraction;
+type MenuInteraction =
+  | ButtonInteraction
+  | StringSelectMenuInteraction
+  | UserSelectMenuInteraction
+  | ModalSubmitInteraction;
 
 /* -------------------------------------------------------------------------- */
 /* Routing                                                                    */
@@ -58,6 +66,12 @@ export async function routeKingMenu(interaction: MenuInteraction, action: string
     if (action === 'pick-undo') return doUndo(interaction, target);
     if (action === 'pick-remove') return doRemove(interaction, target);
     if (action === 'pick-reinstate') return doReinstate(interaction, target);
+    if (action === 'pick-dm') return showDmModal(interaction, target);
+    return;
+  }
+
+  if (interaction.isModalSubmit()) {
+    if (action === 'dm-send') return doSendDm(interaction);
     return;
   }
 
@@ -92,6 +106,8 @@ export async function routeKingMenu(interaction: MenuInteraction, action: string
       return doRefreshHub(interaction);
     case 'language':
       return doLanguagePicker(interaction);
+    case 'dm':
+      return respondPrivately(interaction, buildMemberPicker('dm', guild.id));
   }
 
 }
@@ -421,4 +437,61 @@ async function doSetLanguageFromSelect(interaction: StringSelectMenuInteraction)
   // After language change, stringsIn now returns the new locale
   const t = stringsIn(guild.id);
   await finish(interaction, t.admin.languageSwitched({ label: result.label }));
+}
+
+async function showDmModal(interaction: UserSelectMenuInteraction, targetId: string): Promise<void> {
+  const t = stringsIn(interaction.guild!.id);
+
+  const modal = new ModalBuilder()
+    .setCustomId(encodeId(NS.MENU, 'dm-send', targetId))
+    .setTitle(t.admin.dmModalTitle)
+    .addComponents(
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder()
+          .setCustomId('message')
+          .setLabel(t.admin.dmModalLabel)
+          .setPlaceholder(t.admin.dmModalPlaceholder)
+          .setStyle(TextInputStyle.Paragraph)
+          .setRequired(true)
+          .setMinLength(1)
+          .setMaxLength(2000),
+      ),
+    );
+
+  await interaction.showModal(modal);
+}
+
+async function doSendDm(interaction: ModalSubmitInteraction): Promise<void> {
+  const guild = interaction.guild!;
+  const t = stringsIn(guild.id);
+  const targetId = decodeId(interaction.customId)?.args[0];
+  const message = interaction.fields.getTextInputValue('message').trim();
+
+  if (!targetId) {
+    await interaction.reply({ content: t.genericError, flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  if (!message) {
+    await interaction.reply({ content: t.admin.dmEmpty, flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  try {
+    const member = await guild.members.fetch(targetId);
+    await member.send(message);
+
+    logAction(guild, {
+      kind: 'admin',
+      actorId: interaction.user.id,
+      summary: `sent a custom DM to <@${targetId}>`,
+    });
+
+    await interaction.editReply({ content: t.admin.dmSent({ mention: `<@${targetId}>` }) });
+  } catch (error) {
+    logger.warn(`Could not send KING DM to ${targetId} in ${guild.id}`, error);
+    await interaction.editReply({ content: t.admin.dmFailed({ mention: `<@${targetId}>` }) });
+  }
 }

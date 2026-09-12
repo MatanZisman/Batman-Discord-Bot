@@ -3,6 +3,7 @@ import {
   type ButtonInteraction,
   type ChatInputCommandInteraction,
   type GuildMemberRoleManager,
+  type ModalSubmitInteraction,
   type StringSelectMenuInteraction,
   type UserSelectMenuInteraction,
 } from 'discord.js';
@@ -14,7 +15,8 @@ type AnyGuildInteraction =
   | ChatInputCommandInteraction
   | ButtonInteraction
   | StringSelectMenuInteraction
-  | UserSelectMenuInteraction;
+  | UserSelectMenuInteraction
+  | ModalSubmitInteraction;
 
 export type GuardResult = { ok: true } | { ok: false; message: string };
 

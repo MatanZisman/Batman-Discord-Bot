@@ -15,8 +15,9 @@
  *    - A player with only one or two votes is barely moved at all. We do this
  *      with Bayesian shrinkage toward Green, not with a hard "min votes" cliff,
  *      so standing moves smoothly as evidence accumulates.
- *    - Votes expire individually after VOTE_LIFETIME_DAYS. The voter is free to
- *      cast a fresh vote afterwards. Nobody is branded forever.
+ *    - Ratings do not expire. Once cast they stay until the rater changes
+ *      them, leaves the system, or a review drops them. Set VOTES_EXPIRE to
+ *      true and tune VOTE_LIFETIME_DAYS if you want time-limited ratings again.
  *    - The system is ASYMMETRIC ON PURPOSE. Sliding into Green is easy and
  *      cheap; reaching Red requires a high score AND a real crowd AND broad
  *      agreement. False positives on Red are the expensive mistake, so Red is
@@ -93,29 +94,18 @@ export interface TierConfig {
  *  ladder is reachable at that volume; see CALIBRATION BY SERVER SIZE at the
  *  bottom of this file for what to raise as the server grows.
  *
- *  Worked examples (assume all voters are Green, so every vote carries weight
- *  1.0, and all votes are fresh):
+ *  Worked examples (Green voters, fresh votes, with GOOD_VOTE_WEIGHTS on):
  *
- *    1 voter says 5      -> score 1.80  -> stays Green  (one grudge is noise)
- *    2 voters say 5      -> score 2.33  -> Green, Yellow blocked at 2 raters
- *    3 voters say 3      -> score 1.86  -> Green  (mild friction is not a tier)
- *    3 voters say 5      -> score 2.71  -> Yellow
- *    4 voters say 3      -> score 2.00  -> Yellow
- *    5 voters say 3      -> score 2.11  -> Yellow  <- the small-lobby case
- *    5 voters average 3.4-> score 2.33  -> Yellow
- *    5 voters say 4      -> score 2.67  -> Yellow
- *    6 voters say 3      -> score 2.20  -> Yellow
- *    5 voters say 5      -> score 3.22  -> Orange
- *    6 voters say 5      -> score 3.67  -> Orange
- *    8 voters say 5      -> score 3.67  -> Red
- *    8 voters say 4      -> score 3.00  -> Yellow  (agreement, but on "4")
- *   12 voters, 6 say 5 and 6 say 1
- *                        -> score 2.50  -> Yellow, and the consensus gate
- *                                          would block Orange regardless
+ *    1 voter says 5      -> stays Green  (one grudge is noise)
+ *    4 voters say 5      -> Green, Yellow blocked at headcount (< 5)
+ *    5 voters say 3      -> Green  (score still below Yellow 2.5)
+ *    5 voters say 4      -> Yellow
+ *    5 voters say 5      -> Yellow
+ *    ~10 voters say 5    -> Orange becomes reachable on score
+ *    Red (4.25) needs a large, consistent pile of harsh ratings
  *
- *  So: a lone angry teammate does nothing, two do nothing, but a whole small
- *  lobby that broadly agrees moves you immediately — and Red still needs eight
- *  people independently saying the worst thing on the scale.
+ *  Good ratings (1) weigh more than harsh ones (5), so positive evidence is
+ *  stronger than negative evidence of the same headcount.
  * ---------------------------------------------------------------------------
  */
 export const TIERS: TierConfig[] = [
@@ -146,11 +136,10 @@ export const TIERS: TierConfig[] = [
       { name: 'Comp', kind: 'voice', userLimit: 5, count: 2 },
     ],
     voteWeight: 0.65,
-    // Set so that five people who broadly agree you are hard to play with are
-    // enough. Five ratings averaging 3.0 land on 2.11, just over this line.
-    enterAtScore: 2.0,
-    minRaters: 3,
-    minEffectiveWeight: 2.0,
+    enterAtScore: 2.5,
+    minRaters: 5,
+    // Five harsh ratings weigh 0.5 each under GOOD_VOTE_WEIGHTS → 2.5 total.
+    minEffectiveWeight: 2.5,
     minStrongVoteShare: 0,
   },
   {
@@ -164,7 +153,7 @@ export const TIERS: TierConfig[] = [
       { name: 'Comp', kind: 'voice', userLimit: 5, count: 2 },
     ],
     voteWeight: 0.4,
-    enterAtScore: 3.2,
+    enterAtScore: 3.5,
     minRaters: 5,
     minEffectiveWeight: 3.5,
     minStrongVoteShare: 0.5,
@@ -180,11 +169,7 @@ export const TIERS: TierConfig[] = [
       { name: 'Comp', kind: 'voice', userLimit: 5, count: 2 },
     ],
     voteWeight: 0.2,
-    // 4.00 was unreachable below twelve unanimous raters, which a small server
-    // never produces. At 3.60 the binding constraint becomes minRaters below:
-    // Red means eight separate people rating you 4 or 5, with 60% of the
-    // weight at 5. Raise this back toward 4.00 once you outgrow that.
-    enterAtScore: 3.6,
+    enterAtScore: 4.25,
     minRaters: 8,
     minEffectiveWeight: 5.5,
     minStrongVoteShare: 0.6,
@@ -214,18 +199,33 @@ export const SCORING = {
   PRIOR_VALUE: 1,
 
   /**
-   * VOTE LIFETIME — a vote stops counting this many days after it was cast.
-   * Expired votes are cleared from the tally and the voter may cast a new one.
+   * GOOD-VOTE EMPHASIS — a rating of 1 (great teammate) carries more influence
+   * than a rating of 5 (very difficult). Positive evidence is stronger than
+   * negative evidence of the same headcount. Keys are the rating values.
+   * Set every entry to 1 to disable.
    */
+  GOOD_VOTE_WEIGHTS: {
+    1: 1.5,
+    2: 1.25,
+    3: 1.0,
+    4: 0.75,
+    5: 0.5,
+  } as Readonly<Record<number, number>>,
+
+  /**
+   * VOTE LIFETIME — when VOTES_EXPIRE is true, a vote stops counting this many
+   * days after it was cast. When false (the shipped setting), ratings never
+   * age out on their own.
+   */
+  VOTES_EXPIRE: false,
   VOTE_LIFETIME_DAYS: 30,
 
   /**
-   * RECENCY DECAY — within its lifetime a vote linearly loses influence from
-   * 100% (just cast) down to RECENCY_FLOOR_WEIGHT (about to expire). This
-   * removes the cliff edge where an expiring vote suddenly vanishes.
-   * Set RECENCY_DECAY_ENABLED to false for flat weighting.
+   * RECENCY DECAY — within a lifetime a vote linearly loses influence from
+   * 100% (just cast) down to RECENCY_FLOOR_WEIGHT. Only meaningful when
+   * VOTES_EXPIRE is true. Left off while ratings never expire.
    */
-  RECENCY_DECAY_ENABLED: true,
+  RECENCY_DECAY_ENABLED: false,
   RECENCY_FLOOR_WEIGHT: 0.5,
 
   /**
@@ -316,9 +316,9 @@ export const LIMITS = {
   /** Minutes an ephemeral rating session stays interactive. */
   RATING_SESSION_TIMEOUT_MINUTES: 10,
   /**
-   * How often the background sweeper runs. It expires aged-out votes, advances
-   * challenges past their deadlines, and re-evaluates anyone whose adjustment
-   * has run out.
+   * How often the background sweeper runs. It advances challenges past their
+   * deadlines, re-evaluates anyone whose adjustment has run out, and (only if
+   * VOTES_EXPIRE is on) ages out old ratings.
    */
   SWEEP_INTERVAL_MINUTES: 15,
 } as const;
@@ -359,9 +359,9 @@ export const LIMITS = {
  *  Reaching a threshold T needs (T-1)/(5-T) extra maximum-severity reports per
  *  report's worth of relief granted. With the shipped thresholds:
  *
- *      Yellow (2.0)    0.33 reports per credit
- *      Orange (3.2)    1.22
- *      Red    (3.6)    1.86
+ *      Yellow (2.5)    0.60 reports per credit
+ *      Orange (3.5)    1.67
+ *      Red    (4.25)   4.33
  *
  *  So relief barely slows a slide into Yellow and strongly resists Red, which
  *  is the right shape: a moderator saying "this is overblown" should be hard

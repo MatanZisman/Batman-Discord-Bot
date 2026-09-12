@@ -5,7 +5,7 @@ import {
   EmbedBuilder,
   type BaseMessageOptions,
 } from 'discord.js';
-import { LIMITS, SCORING, SERVER_LAYOUT, TIERS } from '../config.js';
+import { LIMITS, SERVER_LAYOUT, TIERS } from '../config.js';
 import { stringsIn } from '../i18n/index.js';
 import { NS, encodeId } from '../lib/custom-ids.js';
 
@@ -68,9 +68,7 @@ export function buildRatingHubMessage(guildId: string): BaseMessageOptions {
       },
       {
         name: t.hub.effectTitle,
-        value: t.hub.effectPoints
-          .map((p) => (typeof p === 'function' ? p({ days: SCORING.VOTE_LIFETIME_DAYS }) : p))
-          .join('\n'),
+        value: t.hub.effectPoints.join('\n'),
       },
       {
         name: t.hub.privacyTitle,
@@ -82,7 +80,7 @@ export function buildRatingHubMessage(guildId: string): BaseMessageOptions {
       },
       {
         name: t.hub.optOutTitle,
-        value: t.hub.optOutBody({ days: SCORING.VOTE_LIFETIME_DAYS }),
+        value: t.hub.optOutBody,
       },
     )
     .setFooter({ text: t.hub.footer });

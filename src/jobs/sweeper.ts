@@ -11,9 +11,8 @@ import { logger } from '../lib/logger.js';
  * The only clock in the system. Everything time-based happens here so there is
  * exactly one place to look when something did not fire.
  *
- *   1. Votes older than VOTE_LIFETIME_DAYS stop counting, and the members they
- *      were about get recomputed (which is how people climb back up over time
- *      without doing anything at all).
+ *   1. (Optional) Votes older than VOTE_LIFETIME_DAYS stop counting when
+ *      SCORING.VOTES_EXPIRE is true.
  *   2. Review requests nobody acted on close themselves.
  *   3. Members whose moderator adjustment has just run out are re-evaluated,
  *      so their roles follow a score that changed on a clock.
@@ -38,21 +37,23 @@ export function startSweeper(client: Client): NodeJS.Timeout {
 export async function sweep(client: Client): Promise<void> {
   const now = Date.now();
 
-  /* 1. Expire aged-out votes ------------------------------------------- */
-  const cutoff = now - SCORING.VOTE_LIFETIME_DAYS * DAY_MS;
-  const affected = repo.expireStaleVotes(cutoff);
+  /* 1. Expire aged-out votes (only when enabled) ----------------------- */
+  if (SCORING.VOTES_EXPIRE) {
+    const cutoff = now - SCORING.VOTE_LIFETIME_DAYS * DAY_MS;
+    const affected = repo.expireStaleVotes(cutoff);
 
-  if (affected.length > 0) {
-    logger.info(`Expired votes affecting ${affected.length} member(s)`);
-  }
+    if (affected.length > 0) {
+      logger.info(`Expired votes affecting ${affected.length} member(s)`);
+    }
 
-  for (const { guild_id, target_id } of affected) {
-    if (repo.isGuildPaused(guild_id)) continue;
-    const guild = await client.guilds.fetch(guild_id).catch(() => null);
-    if (!guild) continue;
-    await recalculateStanding(guild, target_id).catch((error) =>
-      logger.error(`Recalculation after expiry failed for ${target_id}`, error),
-    );
+    for (const { guild_id, target_id } of affected) {
+      if (repo.isGuildPaused(guild_id)) continue;
+      const guild = await client.guilds.fetch(guild_id).catch(() => null);
+      if (!guild) continue;
+      await recalculateStanding(guild, target_id).catch((error) =>
+        logger.error(`Recalculation after expiry failed for ${target_id}`, error),
+      );
+    }
   }
 
   /* 2. Close review requests nobody acted on --------------------------- */

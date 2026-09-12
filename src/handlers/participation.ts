@@ -1,5 +1,5 @@
 import { type ButtonInteraction, type ChatInputCommandInteraction } from 'discord.js';
-import { DAY_MS, SCORING, SERVER_LAYOUT, TIERS, tierAt } from '../config.js';
+import { SERVER_LAYOUT, TIERS, tierAt } from '../config.js';
 import { logAction } from '../core/action-log.js';
 import * as repo from '../db/repo.js';
 import { applyTierRoles, recalculateStanding } from '../core/standing-service.js';
@@ -47,7 +47,7 @@ export async function handleLeave(interaction: ButtonInteraction): Promise<void>
 
   const t = stringsIn(guild.id);
   await respondPrivately(interaction, {
-    content: t.participation.leftMsg({ days: SCORING.VOTE_LIFETIME_DAYS }),
+    content: t.participation.leftMsg,
     components: [],
   });
 
@@ -81,10 +81,9 @@ export async function handleJoin(interaction: ButtonInteraction): Promise<void> 
   repo.audit(guild.id, 'opt_in', userId);
   logAction(guild, { kind: 'opt_in', actorId: userId });
 
-  // Ratings that were paused when they left come back, minus any that aged out
-  // in the meantime.
-  const cutoff = Date.now() - SCORING.VOTE_LIFETIME_DAYS * DAY_MS;
-  const affectedTargets = repo.restoreVotesInvolving(guild.id, userId, cutoff);
+  // Ratings that were paused when they left come back in full — ratings do
+  // not age out while someone is away.
+  const affectedTargets = repo.restoreVotesInvolving(guild.id, userId, Number.NEGATIVE_INFINITY);
 
   const result = await recalculateStanding(guild, userId, { notifyUser: false });
   const tierName = result
