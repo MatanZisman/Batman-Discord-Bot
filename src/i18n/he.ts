@@ -354,6 +354,7 @@ export const he = {
     announceOffBtn: 'הפסק לשלוח הודעות',
     refreshHubBtn: 'פרסם מחדש את המדריך',
     languageBtn: 'Language / שפה',
+    viewScoreBtn: 'צפה בציון',
     dmBtn: 'שלח הודעה פרטית',
 
     pickerAdjust: 'למי תרצה להתאים את הציון?',
@@ -361,6 +362,7 @@ export const he = {
     pickerRemove: 'את מי תרצה להסיר מהמערכת?',
     pickerReinstate: 'למי תרצה לאפשר לחזור?',
     pickerDm: 'למי תרצה לשלוח הודעה?',
+    pickerViewScore: 'את הציון של מי תרצה לראות?',
     pickerChoose: 'בחר חבר',
 
     pickerWarnAdjust:
@@ -373,6 +375,14 @@ export const he = {
       'הפעולה רק מסירה את החסימה. החבר יישאר מחוץ למערכת עד שיבחר להצטרף, ורק אז הדירוגים המוקפאים יחזרו להשפיע.',
     pickerWarnDm:
       'במסך הבא תכתוב את ההודעה בעצמך. היא תישלח כהודעה פרטית מהבוט.',
+    pickerWarnViewScore:
+      'מציג את הציון המספרי ואת האזור. זהות המדרגים לא מוצגת. רק אתה רואה את התשובה.',
+
+    viewScoreOutside: (a: { mention: string }) =>
+      `${ltr(a.mention)} מחוץ למערכת הדירוג, ולכן אין ציון להציג.`,
+    viewScoreHeader: (a: { mention: string; area: string }) =>
+      `**${ltr(a.mention)} — ${a.area}**`,
+    viewScoreNote: 'זהות המדרגים לא מוצגת.',
 
     dmModalTitle: 'שליחת הודעה פרטית',
     dmModalLabel: 'ההודעה',
