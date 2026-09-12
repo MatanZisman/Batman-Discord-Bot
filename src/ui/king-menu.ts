@@ -77,11 +77,15 @@ export function buildKingMenuMessage(
           .setLabel(t.admin.refreshHubBtn)
           .setStyle(ButtonStyle.Secondary),
       ),
-      // Row 4: language + free-text DM.
+      // Row 4: language, lookup, free-text DM.
       new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder()
           .setCustomId(encodeId(NS.MENU, 'language'))
           .setLabel(t.admin.languageBtn)
+          .setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder()
+          .setCustomId(encodeId(NS.MENU, 'view-score'))
+          .setLabel(t.admin.viewScoreBtn)
           .setStyle(ButtonStyle.Secondary),
         new ButtonBuilder()
           .setCustomId(encodeId(NS.MENU, 'dm'))
@@ -137,7 +141,7 @@ function renderStats(guildId: string, stats: AdminStats, logChannelId: string | 
 
 /** Step 1 of the member-targeted actions: who? */
 export function buildMemberPicker(
-  action: 'adjust' | 'remove' | 'reinstate' | 'undo' | 'dm',
+  action: 'adjust' | 'remove' | 'reinstate' | 'undo' | 'dm' | 'view-score',
   guildId?: string,
 ): BaseMessageOptions {
   const t = guildId ? stringsIn(guildId) : stringsIn('');
@@ -148,6 +152,7 @@ export function buildMemberPicker(
     remove: t.admin.pickerRemove,
     reinstate: t.admin.pickerReinstate,
     dm: t.admin.pickerDm,
+    'view-score': t.admin.pickerViewScore,
   }[action];
 
   const warning = {
@@ -156,6 +161,7 @@ export function buildMemberPicker(
     remove: t.admin.pickerWarnRemove,
     reinstate: t.admin.pickerWarnReinstate,
     dm: t.admin.pickerWarnDm,
+    'view-score': t.admin.pickerWarnViewScore,
   }[action];
 
   return {

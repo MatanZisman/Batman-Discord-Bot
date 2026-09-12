@@ -388,6 +388,7 @@ export const en = {
     announceOffBtn: 'Stop announcing',
     refreshHubBtn: 'Repost the public guide',
     languageBtn: 'Language / שפה',
+    viewScoreBtn: 'View a score',
     dmBtn: 'Send a DM',
 
     // Member picker prompts
@@ -396,6 +397,7 @@ export const en = {
     pickerRemove: 'Who do you want to remove from the system?',
     pickerReinstate: 'Who do you want to let back in?',
     pickerDm: 'Who do you want to message?',
+    pickerViewScore: 'Whose score do you want to see?',
     pickerChoose: 'Choose a member',
 
     pickerWarnAdjust:
@@ -408,6 +410,14 @@ export const en = {
       'This only lifts the block. They stay outside the system until they choose to rejoin, and their suspended ratings resume then.',
     pickerWarnDm:
       'You will write the message yourself on the next screen. It is sent as a private DM from the bot.',
+    pickerWarnViewScore:
+      'Shows their numeric score and area. Individual raters are never named. Only you see this reply.',
+
+    viewScoreOutside: (a: { mention: string }) =>
+      `${a.mention} is outside the standing system, so there is no score to show.`,
+    viewScoreHeader: (a: { mention: string; area: string }) =>
+      `**${a.mention} — ${a.area}**`,
+    viewScoreNote: 'Individual raters are never shown.',
 
     dmModalTitle: 'Send a private DM',
     dmModalLabel: 'Message',

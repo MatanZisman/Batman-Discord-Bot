@@ -13,7 +13,7 @@ import {
   type UserSelectMenuInteraction,
 } from 'discord.js';
 import { NS, decodeId, encodeId } from '../lib/custom-ids.js';
-import { CREDITS, tierIndexByKey } from '../config.js';
+import { CREDITS, tierAt, tierIndexByKey } from '../config.js';
 import { logAction } from '../core/action-log.js';
 import {
   applyAdjustment,
@@ -26,7 +26,8 @@ import { publishRatingHub } from '../core/guild-setup.js';
 import { applyLanguage } from '../core/language.js';
 import { publishKingMenu } from '../core/king-panel.js';
 import { pauseGuild, resumeGuild } from '../core/maintenance.js';
-import { applyTierRoles, recalculateGuild, recalculateStanding } from '../core/standing-service.js';
+import { explainStanding } from '../core/scoring.js';
+import { applyTierRoles, evaluateStanding, recalculateGuild, recalculateStanding } from '../core/standing-service.js';
 import * as repo from '../db/repo.js';
 import { stringsIn } from '../i18n/index.js';
 import { LOCALE_LABELS } from '../i18n/locale.js';
@@ -67,6 +68,7 @@ export async function routeKingMenu(interaction: MenuInteraction, action: string
     if (action === 'pick-remove') return doRemove(interaction, target);
     if (action === 'pick-reinstate') return doReinstate(interaction, target);
     if (action === 'pick-dm') return showDmModal(interaction, target);
+    if (action === 'pick-view-score') return doViewScore(interaction, target);
     return;
   }
 
@@ -106,6 +108,8 @@ export async function routeKingMenu(interaction: MenuInteraction, action: string
       return doRefreshHub(interaction);
     case 'language':
       return doLanguagePicker(interaction);
+    case 'view-score':
+      return respondPrivately(interaction, buildMemberPicker('view-score', guild.id));
     case 'dm':
       return respondPrivately(interaction, buildMemberPicker('dm', guild.id));
   }
@@ -459,6 +463,41 @@ async function showDmModal(interaction: UserSelectMenuInteraction, targetId: str
     );
 
   await interaction.showModal(modal);
+}
+
+async function doViewScore(interaction: UserSelectMenuInteraction, targetId: string): Promise<void> {
+  const guild = interaction.guild!;
+  const t = stringsIn(guild.id);
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  const record = repo.ensureMember(guild.id, targetId);
+  if (record.participating === 0) {
+    await interaction.editReply({
+      content: t.admin.viewScoreOutside({ mention: `<@${targetId}>` }),
+      components: [],
+    });
+    return;
+  }
+
+  const { standing } = await evaluateStanding(guild, targetId, record);
+  const area = tierAt(standing.tierIndex).roleName;
+
+  logAction(guild, {
+    kind: 'admin',
+    actorId: interaction.user.id,
+    summary: `viewed score for <@${targetId}>`,
+  });
+
+  await interaction.editReply({
+    content: [
+      t.admin.viewScoreHeader({ mention: `<@${targetId}>`, area }),
+      '',
+      explainStanding(standing, guild.id),
+      '',
+      t.admin.viewScoreNote,
+    ].join('\n'),
+    components: [],
+  });
 }
 
 async function doSendDm(interaction: ModalSubmitInteraction): Promise<void> {
