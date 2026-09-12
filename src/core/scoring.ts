@@ -21,10 +21,10 @@ import { stringsIn } from '../i18n/index.js';
  *  ---------------------------------------------------------------------------
  *  HOW ONE VOTE BECOMES INFLUENCE
  *  ---------------------------------------------------------------------------
- *  Each vote carries a rating of 1..5 and a weight built from three factors,
+ *  Each vote carries a rating of 1..5 and a weight built from four factors,
  *  multiplied together:
  *
- *    weight = trustFactor x recencyFactor x tenureFactor
+ *    weight = trustFactor x recencyFactor x tenureFactor x ratingValueFactor
  *
  *    trustFactor    Your own standing. Green voters carry full weight; the
  *                   worse your standing the quieter your voice, so a group of
@@ -32,9 +32,9 @@ import { stringsIn } from '../i18n/index.js';
  *                   -> TIERS[].voteWeight
  *
  *    recencyFactor  A vote is loudest the day it is cast and fades linearly to
- *                   RECENCY_FLOOR_WEIGHT by the time it expires. Beyond
- *                   VOTE_LIFETIME_DAYS it is simply not counted, and the voter
- *                   is free to cast a fresh one.
+ *                   RECENCY_FLOOR_WEIGHT by the time it expires (only when
+ *                   VOTES_EXPIRE is on). Beyond VOTE_LIFETIME_DAYS it is simply
+ *                   not counted. With VOTES_EXPIRE off, this factor is always 1.
  *                   -> SCORING.RECENCY_DECAY_ENABLED / RECENCY_FLOOR_WEIGHT
  *
  *    tenureFactor   Brand new members ramp up from
@@ -44,6 +44,12 @@ import { stringsIn } from '../i18n/index.js';
  *                   itself, so a young server does not dampen its own founding
  *                   members into silence.
  *                   -> SCORING.NEW_MEMBER_WEIGHT_MULTIPLIER
+ *
+ *    ratingValueFactor
+ *                   How good or bad the rating itself is. A "1" (great) weighs
+ *                   more than a "5" (very difficult), so positive evidence is
+ *                   stronger than negative evidence of the same headcount.
+ *                   -> SCORING.GOOD_VOTE_WEIGHTS
  *
  *  ---------------------------------------------------------------------------
  *  HOW WEIGHTS BECOME A SCORE
@@ -135,7 +141,7 @@ export interface WeightedVote {
   value: number;
   weight: number;
   ageDays: number;
-  factors: { trust: number; recency: number; tenure: number };
+  factors: { trust: number; recency: number; tenure: number; value: number };
 }
 
 /**
@@ -209,17 +215,35 @@ export function trustFactor(rater: RaterContext): number {
   return tierAt(index).voteWeight;
 }
 
+/**
+ * Good ratings pull harder than harsh ones. A "1" outweighs a "5" so recovery
+ * is stronger than demotion pressure from the same number of votes.
+ */
+export function ratingValueFactor(value: number): number {
+  const clamped = clamp(value, SCORING.MIN_RATING, SCORING.MAX_RATING);
+  return SCORING.GOOD_VOTE_WEIGHTS[clamped] ?? 1;
+}
+
 /** Recency component: 1.0 when fresh, decaying to RECENCY_FLOOR_WEIGHT at expiry. */
 export function recencyFactor(
   ageDays: number,
   lifetimeDays: number = SCORING.VOTE_LIFETIME_DAYS,
 ): number {
-  if (!SCORING.RECENCY_DECAY_ENABLED) return 1;
+  // Vote path: no lifetime, no fade.
+  if (lifetimeDays === SCORING.VOTE_LIFETIME_DAYS) {
+    if (!SCORING.VOTES_EXPIRE || !SCORING.RECENCY_DECAY_ENABLED) return 1;
+  }
+
+  return lifetimeFade(ageDays, lifetimeDays, SCORING.RECENCY_FLOOR_WEIGHT);
+}
+
+/** Linear fade used by votes (when enabled) and by moderator adjustments. */
+function lifetimeFade(ageDays: number, lifetimeDays: number, floor: number): number {
   if (lifetimeDays <= 0) return 0;
   if (ageDays <= 0) return 1;
-  if (ageDays >= lifetimeDays) return 0; // expired; caller filters these out anyway
+  if (ageDays >= lifetimeDays) return 0;
   const progress = ageDays / lifetimeDays;
-  return 1 - progress * (1 - SCORING.RECENCY_FLOOR_WEIGHT);
+  return 1 - progress * (1 - floor);
 }
 
 /**
@@ -260,7 +284,7 @@ export function weighVotes(
   for (const vote of votes) {
     const ageDays = (now - vote.castAt) / DAY_MS;
 
-    if (ageDays >= SCORING.VOTE_LIFETIME_DAYS) {
+    if (SCORING.VOTES_EXPIRE && ageDays >= SCORING.VOTE_LIFETIME_DAYS) {
       ignored.push({ raterId: vote.raterId, reason: 'expired' });
       continue;
     }
@@ -268,7 +292,8 @@ export function weighVotes(
     const trust = trustFactor(vote);
     const recency = recencyFactor(ageDays);
     const tenure = tenureFactor(vote.tenureMs, communityAgeMs);
-    const weight = trust * recency * tenure;
+    const value = ratingValueFactor(vote.value);
+    const weight = trust * recency * tenure * value;
 
     if (weight <= 0) {
       ignored.push({ raterId: vote.raterId, reason: vote.participating ? 'zero weight' : 'rater opted out' });
@@ -280,7 +305,7 @@ export function weighVotes(
       value: clamp(vote.value, SCORING.MIN_RATING, SCORING.MAX_RATING),
       weight,
       ageDays,
-      factors: { trust, recency, tenure },
+      factors: { trust, recency, tenure, value },
     });
   }
 
@@ -302,7 +327,9 @@ export function weighCredits(credits: CreditInput[], now: number): WeightedCredi
 
     const lifetimeDays = (credit.expiresAt - credit.grantedAt) / DAY_MS;
     const ageDays = (now - credit.grantedAt) / DAY_MS;
-    const fade = CREDITS.DECAY_ENABLED ? recencyFactor(ageDays, lifetimeDays) : 1;
+    const fade = CREDITS.DECAY_ENABLED
+      ? lifetimeFade(ageDays, lifetimeDays, SCORING.RECENCY_FLOOR_WEIGHT)
+      : 1;
     const weight = credit.reports * fade;
 
     if (weight <= 0) continue;

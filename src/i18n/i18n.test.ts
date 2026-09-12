@@ -268,18 +268,11 @@ describe('dynamic catalog strings', () => {
     expect(result.length).toBeGreaterThan(0);
   });
 
-  it('en expiry effect point formats correctly', () => {
-    const fn = en.hub.effectPoints[3] as (a: { days: number }) => string;
-    expect(typeof fn).toBe('function');
-    const result = fn({ days: 30 });
-    expect(result).toContain('30');
+  it('en effect points mention that ratings do not expire', () => {
+    expect(en.hub.effectPoints[3]).toContain('do not expire');
   });
 
-  it('he expiry effect point is a function', () => {
-    const fn = he.hub.effectPoints[3] as (a: { days: number }) => string;
-    expect(typeof fn).toBe('function');
-    const result = fn({ days: 30 });
-    expect(typeof result).toBe('string');
-    expect(result).toContain('30');
+  it('he effect points mention that ratings do not expire', () => {
+    expect(he.hub.effectPoints[3]).toContain('לא פגים');
   });
 });

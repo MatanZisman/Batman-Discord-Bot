@@ -55,8 +55,7 @@ export const en = {
       '• **One rating per person, per player.** You can change your rating later, but you can never stack a second one on top.',
       '• **Ratings from people in good standing count for more.** A group in poor standing cannot gang up on someone.',
       '• **One rating barely moves anyone.** Neither do two. Moving between areas takes a real group of people who broadly agree.',
-      (a: { days: number }) =>
-        `• **Ratings expire by themselves after ${a.days} days.** Nothing you do follows you around forever, and nobody has to forgive you for it — it just lapses.`,
+      '• **Ratings do not expire on their own.** They stay until the person who gave them changes them, leaves the system, or a review drops them.',
       '• **Brand new accounts count for very little**, so nobody can swing a result with throwaway alts.',
     ] as const,
 
@@ -76,11 +75,11 @@ export const en = {
       ].join('\n'),
 
     optOutTitle: '⑥ Opting out',
-    optOutBody: (a: { days: number }) =>
+    optOutBody:
       [
         'Press **Participation** to leave the system entirely. Every rating involving you stops counting, you have no standing, nobody can rate you, and you cannot rate anyone. You keep access to all the channels that existed before this system, and you can rejoin whenever you like.',
         '',
-        `Leaving is not a shortcut to a clean slate: if you rejoin, ratings that have not yet aged out resume. They expire ${a.days} days after they were given either way, so time clears your record — for everyone, on the same terms.`,
+        'Leaving is not a shortcut to a clean slate: if you rejoin, the ratings that were paused come back. They are suspended while you are out, not erased.',
       ].join('\n'),
 
     footer: 'Nothing you press here is visible to anyone else in this server.',
@@ -132,7 +131,7 @@ export const en = {
     doneBtn: 'No, I am done',
 
     closedWithRatings: (a: { count: number }) =>
-      `Thanks. ${a.count} rating(s) recorded. They stay private and will expire on their own.`,
+      `Thanks. ${a.count} rating(s) recorded. They stay private.`,
     closedNone: 'No ratings recorded. You can come back any time.',
 
     errorSelf: 'You cannot rate yourself.',
@@ -190,27 +189,25 @@ export const en = {
       ].join('\n'),
 
     confirmLeaveTitle: '**Leave the standing system?**',
-    confirmLeaveBody: (a: { days: number }) =>
-      [
-        'If you leave:',
-        '• Every rating you have given and received stops counting immediately.',
-        '• You lose access to the colour areas, and keep every channel that was in the server beforehand.',
-        '• Nobody can rate you, and you cannot rate anyone.',
-        '',
-        `If you rejoin, ratings that have not yet aged out resume where they left off — leaving is not a way to clear them. They expire on their own ${a.days} days after they were given, whether you are in the system or not, so staying out that long clears them exactly as it would for anyone else.`,
-      ].join('\n'),
+    confirmLeaveBody: [
+      'If you leave:',
+      '• Every rating you have given and received stops counting immediately.',
+      '• You lose access to the colour areas, and keep every channel that was in the server beforehand.',
+      '• Nobody can rate you, and you cannot rate anyone.',
+      '',
+      'If you rejoin, the paused ratings come back where they left off — leaving is not a way to clear them.',
+    ].join('\n'),
 
     confirmLeaveYes: 'Yes, leave',
     confirmLeaveCancel: 'Cancel',
 
-    leftMsg: (a: { days: number }) =>
-      [
-        'Done. You are now outside the standing system.',
-        '',
-        `Every rating involving you has stopped counting, and you have no standing. Nobody can rate you and you cannot rate anyone. You keep access to the open channels and can rejoin at any time.`,
-        '',
-        `If you come back, any ratings that have not yet aged out will pick up where they left off. They expire on their own ${a.days} days after they were given, whether you are in the system or not — so staying out that long does clear them, the same way it would for anyone else.`,
-      ].join('\n'),
+    leftMsg: [
+      'Done. You are now outside the standing system.',
+      '',
+      'Every rating involving you has stopped counting, and you have no standing. Nobody can rate you and you cannot rate anyone. You keep access to the open channels and can rejoin at any time.',
+      '',
+      'If you come back, the paused ratings pick up where they left off. Leaving does not erase them.',
+    ].join('\n'),
 
     joinedMsg: (a: { area: string }) =>
       [
@@ -306,7 +303,7 @@ export const en = {
     tierImproved: (a: { area: string }) => `Your community standing moved up to **${a.area}**.`,
     tierChanged: (a: { area: string }) => `Your community standing is now **${a.area}**.`,
     tierPreviously: (a: { area: string }) => `Previously: ${a.area}`,
-    tierPrivate: 'This is private, and ratings expire on their own over time.',
+    tierPrivate: 'This is private. Ratings do not expire on their own.',
     tierChallenge:
       'If you think this is wrong, run `/challenge` in the server to ask the moderators to take another look. Nobody who rated you is contacted, and nobody is told you asked.',
   },
@@ -391,12 +388,14 @@ export const en = {
     announceOffBtn: 'Stop announcing',
     refreshHubBtn: 'Repost the public guide',
     languageBtn: 'Language / שפה',
+    dmBtn: 'Send a DM',
 
     // Member picker prompts
     pickerAdjust: 'Whose score do you want to lean on?',
     pickerUndo: 'Whose adjustments do you want to take back?',
     pickerRemove: 'Who do you want to remove from the system?',
     pickerReinstate: 'Who do you want to let back in?',
+    pickerDm: 'Who do you want to message?',
     pickerChoose: 'Choose a member',
 
     pickerWarnAdjust:
@@ -407,6 +406,16 @@ export const en = {
       'They leave the system and cannot rejoin themselves. Their ratings are suspended, not deleted, so reinstating them puts things back.',
     pickerWarnReinstate:
       'This only lifts the block. They stay outside the system until they choose to rejoin, and their suspended ratings resume then.',
+    pickerWarnDm:
+      'You will write the message yourself on the next screen. It is sent as a private DM from the bot.',
+
+    dmModalTitle: 'Send a private DM',
+    dmModalLabel: 'Message',
+    dmModalPlaceholder: 'Write the message the member should receive…',
+    dmSent: (a: { mention: string }) => `Sent your message to ${a.mention}.`,
+    dmFailed: (a: { mention: string }) =>
+      `Could not DM ${a.mention}. Their DMs from server members are probably closed.`,
+    dmEmpty: 'Write a message first.',
 
     // Adjustment picker
     adjPickerTitle: (a: { mention: string }) => `**How much should ${a.mention}'s score be leaned on?**`,
